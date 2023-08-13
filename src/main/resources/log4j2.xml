@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="INFO">
+	<Appenders>
+		<Console name="STDOUT" target="SYSTEM_OUT">
+			<PatternLayout pattern="%d{HH:mm:ss,SSS} %-5p [%-21c{2}] %m (%F:%L)%n"/>
+		</Console>
+	</Appenders>
+	<Loggers>
+		<Logger name="org.apache.kafka" level="warn"/>
+		<Logger name="jarvey.assoc.motion" level="info"/>
+		
+		<Root level="info">
+			<AppenderRef ref="STDOUT"/>
+		</Root>
+	</Loggers>
+</Configuration>

@@ -1,0 +1,182 @@
+apply plugin: 'java-library'
+apply plugin: 'maven-publish'
+apply plugin: 'com.github.johnrengelman.shadow'
+//apply plugin: 'com.commercehub.gradle.plugin.avro'
+
+group = 'etri'
+version = '0.1.0'
+
+sourceCompatibility = JavaVersion.VERSION_1_8
+[compileJava,compileTestJava]*.options*.encoding = 'UTF-8'
+
+buildscript {
+	repositories {
+		mavenLocal()
+		jcenter()
+		maven {
+			url "https://plugins.gradle.org/m2/"
+		}
+	}
+	dependencies {
+		classpath 'com.github.jengelman.gradle.plugins:shadow:4.0.4'
+//		classpath 'com.netflix.nebula:gradle-aggregate-javadocs-plugin:2.2.+'
+//		classpath 'com.commercehub.gradle.plugin:gradle-avro-plugin:0.9.1'
+	}
+}
+
+repositories {
+	mavenLocal()
+	maven {
+		url "http://repo.osgeo.org/repository/release/"
+	}
+	maven {
+		url "https://packages.confluent.io/maven/"
+	}
+	mavenCentral()
+}
+
+ext {
+	log4j_version = '2.18.0'
+	gson_version = '2.9.0'
+	snakeyaml_version = '1.20'
+	
+	geotools_version = '26.1'
+	jts_version = '1.18.2'
+	picocli_version = '4.1.4'
+	
+	kafka_streams_version = '3.4.1'
+	avro_version = '1.10.2'
+	
+//	postgresql_version = '42.3.3'
+	javalin_version = '4.6.3'
+	okhttp_version = '4.10.0'
+	
+//	combinatoricslib3_version = '3.3.3'
+}
+
+dependencies {
+	compile(project(":utils"))
+	compile(project(":utils.geo"))
+	compile(project(":jarvey.streams"))
+	
+	// Log4j2 & SLF4j bridge
+	implementation "org.apache.logging.log4j:log4j-api:${log4j_version}"
+	implementation "org.apache.logging.log4j:log4j-core:${log4j_version}"
+	implementation "org.apache.logging.log4j:log4j-slf4j-impl:${log4j_version}"
+	
+	implementation "com.google.code.gson:gson:${gson_version}"
+	implementation "org.apache.avro:avro:${avro_version}"
+	implementation "org.yaml:snakeyaml:${snakeyaml_version}"
+	
+	// GeoTools
+	implementation	"org.geotools:gt-main:${geotools_version}"
+	//api "org.locationtech.jts-core:jts:${jts_version}"
+	
+	// Kafka Streams
+	implementation "org.apache.kafka:kafka-streams:${kafka_streams_version}"
+	implementation ('io.confluent:kafka-streams-avro-serde:6.0.1') {
+		exclude group: 'org.apache.kafka', module: 'kafka-clients'
+	}
+	
+	// Postgresql
+	// implementation "org.postgresql:postgresql:${postgresql_version}"
+	
+	// for remote state store access
+	implementation "io.javalin:javalin:${javalin_version}"
+	implementation "com.squareup.okhttp3:okhttp:${okhttp_version}"
+	
+	// command line parser
+	api "info.picocli:picocli:${picocli_version}"
+	
+//	implementation "com.github.dpaukov:combinatoricslib3:${combinatoricslib3_version}"
+	
+	testImplementation group: 'junit', name: 'junit', version: '4.12'
+}
+
+shadowJar {
+	classifier 'all'
+	
+	zip64 true
+	mergeServiceFiles()
+	
+	exclude 'META-INF/*.SF'
+	exclude 'META-INF/*.DSA'
+	exclude 'META-INF/*.RSA'
+}
+
+task sourceJar(type: Jar) {
+	classifier 'sources'
+	from sourceSets.main.allSource
+}
+
+task javadocJar(type: Jar) {
+	classifier 'javadoc'
+	from javadoc.destinationDir
+}
+
+artifacts {
+	archives sourceJar
+	archives javadocJar
+	archives shadowJar
+}
+
+publishing {
+	publications {
+		marmotClient(MavenPublication) {
+			from components.java
+			
+			artifact sourceJar
+			artifact javadocJar
+			artifact shadowJar
+		}
+	}
+}
+
+apply plugin: 'maven-publish'
+publishing {
+	publications {
+		main(MavenPublication) {
+			artifact jar
+			artifact sourceJar
+			artifact javadocJar
+		}
+	}
+}
+
+apply plugin: 'eclipse'
+eclipse {
+	classpath {
+		file {
+			withXml {
+				def node = it.asNode()
+				node.appendNode('classpathentry', [kind: 'output', path: 'classes'])
+			}
+			
+			whenMerged { cp ->
+				Map entryByPath = cp.entries.groupBy { entry -> entry.path }
+				entryByPath.each { key, values ->
+					if ( values.size() > 1 ) {
+            			def entry = values.first()
+            			if ( entry.kind == 'src' ) {
+            				entry.includes = []
+            				entry.excludes = []
+            			}
+            			int index = cp.entries.indexOf entry
+            			cp.entries.removeAll values
+            			cp.entries.add index, entry
+					}
+				}
+				cp.entries.each { entry ->
+					if ( entry.kind == 'src' && entry.hasProperty('output') ) {
+						if ( entry.path.startsWith("src/test/") ) {
+							entry.output = 'test_classes'
+						}
+						else {
+							entry.output = 'classes'
+						}
+					}
+				}
+			}
+		}
+	}
+}

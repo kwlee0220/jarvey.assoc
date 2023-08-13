@@ -1,0 +1,13 @@
+---
+overlap_area:
+   id: "etri_testbed"
+   bindings:
+      - ["etri:04", "etri:05"]
+      - ["etri:04", "etri:06"]
+      - ["etri:05", "etri:06"]
+      - ["etri:05", "etri:07"]
+   distance_threshold:
+      "etri:04": 65
+      "etri:05": 55
+      "etri:06": 45
+      "etri:07": 43

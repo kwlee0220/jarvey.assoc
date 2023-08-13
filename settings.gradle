@@ -1,0 +1,13 @@
+rootProject.name = 'jarvey.assoc'
+
+ext.common_dir = '../../common'
+['utils', 'utils.geo'].each {
+	include ":$it"
+	project(":$it").projectDir = file("$common_dir/$it")
+}
+
+ext.jarvey_dir = '..'
+['jarvey.streams'].each {
+	include ":$it"
+	project(":$it").projectDir = file("$jarvey_dir/$it")
+}
