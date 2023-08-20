@@ -1,69 +1,65 @@
 package jarvey.assoc.motion;
 
-import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BiConsumer;
 
-import org.apache.kafka.streams.kstream.ValueMapperWithKey;
 import org.locationtech.jts.geom.Point;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 
-import jarvey.assoc.OverlapArea;
-import jarvey.assoc.OverlapAreaRegistry;
-import jarvey.streams.model.GlobalTrack;
-import jarvey.streams.model.LocalTrack;
-import jarvey.streams.model.NodeTrack;
-import jarvey.streams.model.TrackletId;
 import utils.func.Funcs;
 import utils.func.Tuple;
 import utils.geo.util.GeoUtils;
 import utils.stream.FStream;
 import utils.stream.KeyedGroups;
 
+import jarvey.assoc.AssociationClosure;
+import jarvey.assoc.OverlapAreaRegistry;
+import jarvey.streams.model.GlobalTrack;
+import jarvey.streams.model.LocalTrack;
+import jarvey.streams.model.TrackletId;
+import jarvey.streams.node.NodeTrack;
+
 /**
  * 
  * @author Kang-Woo Lee (ETRI)
  */
-public class GlobalTrackGenerator implements ValueMapperWithKey<String, NodeTrack,
-																		Iterable<GlobalTrack>> {
+public class GlobalTrackGenerator implements BiConsumer<String, NodeTrack> {
 	private static final long INTERVAL = 100;
 
 	private final OverlapAreaRegistry m_areaRegistry;
 	private final Map<String,AssociationCollection<AssociationClosure>> m_collections;
 	private Map<String, List<LocalTrack>> m_lastLocs = Maps.newHashMap();
+	private final List<BiConsumer<String,GlobalTrack>> m_consumers = Lists.newArrayList();
 	
 	public GlobalTrackGenerator(OverlapAreaRegistry registry,
 								Map<String,AssociationCollection<AssociationClosure>> collections) {
 		m_areaRegistry = registry;
 		m_collections = collections;
 	}
+	
+	public void addOutputConsumer(BiConsumer<String,GlobalTrack> consumer) {
+		m_consumers.add(consumer);
+	}
 
 	@Override
-	public Iterable<GlobalTrack> apply(String areaId, NodeTrack ntrack) {
+	public void accept(String areaId, NodeTrack ntrack) {
 		LocalTrack ltrack = LocalTrack.from(ntrack);
 		if ( areaId == null ) {
 			// overlap area 이외의 장소에 설치된 카메라에서 추적된 이벤트인 경우에는
 			// 바로 global track을 생성한다.
 			GlobalTrack gtrack = ntrack.isDeleted()
 									? GlobalTrack.deleted(ltrack, null) : new GlobalTrack(ltrack, null);
-			return Arrays.asList(gtrack);
+			m_consumers.forEach(c -> c.accept(areaId, gtrack));
 		}
 		else {
-			OverlapArea area = m_areaRegistry.get(areaId);
-			
-			// 특정 거리 밖의 track은 제외시킨다.
-			if ( ntrack.getDistance() > area.getDistanceThreshold(ntrack.getNodeId()) ) {
-				return Collections.emptyList();
-			}
-			
 			AssociationCollection<AssociationClosure> collection = m_collections.get(areaId);
 			if ( collection == null ) {
 				// 'areaId'에 해당하는 지역에 association이 전혀 없는 경우
-				return Arrays.asList(new GlobalTrack(ltrack, areaId));
+				m_consumers.forEach(c -> c.accept(areaId, new GlobalTrack(ltrack, areaId)));
 			}
 			else {
 				// 일정기간 동안 track을 모아서 한번에 처리하도록 한다. (예: 100ms)
@@ -75,15 +71,10 @@ public class GlobalTrackGenerator implements ValueMapperWithKey<String, NodeTrac
 				long ts = ltrack.getTimestamp();
 				List<LocalTrack> expiredTracks = Funcs.filter(bucket, lt -> (ts - lt.getTimestamp()) >= INTERVAL);
 				if ( expiredTracks.isEmpty() ) {
-					return Collections.emptyList();
+					return;
 				}
 				
 				List<AssociationClosure> bestAssocs = collection.getBestAssociations();
-//				// FIXME: 나중에 삭제할 것
-//				for ( AssociationClosure assoc: bestAssocs ) {
-//					System.out.println("\t\tBEST_ASSOC: " + assoc);
-//				}
-//				System.out.println("-------------------------------");
 
 				// 각 track에 대해 associate된 다른 track들과 combine시킨다
 				// Combine된 global track들은 timestamp 순서대로 정렬시킨다.
@@ -99,8 +90,8 @@ public class GlobalTrackGenerator implements ValueMapperWithKey<String, NodeTrac
 				if ( bucket.isEmpty() ) {
 					m_lastLocs.remove(areaId);
 				}
-
-				return gtracks;
+				
+				gtracks.forEach(gt -> m_consumers.forEach(c -> c.accept(areaId, gt)));
 			}
 		}
 	}

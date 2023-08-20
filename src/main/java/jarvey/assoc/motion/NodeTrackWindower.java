@@ -1,36 +1,43 @@
 package jarvey.assoc.motion;
 
 import java.util.List;
+import java.util.function.BiConsumer;
 
-import org.apache.kafka.streams.kstream.ValueMapperWithKey;
+import com.google.common.collect.Lists;
 
-import jarvey.streams.EventCollectingAggregation;
+import utils.stream.FStream;
+
+import jarvey.streams.EventCollectingWindowAggregation;
 import jarvey.streams.HoppingWindowManager;
 import jarvey.streams.Windowed;
-import jarvey.streams.model.NodeTrack;
 import jarvey.streams.model.Timestamped;
-import utils.stream.FStream;
+import jarvey.streams.node.NodeTrack;
+
 
 /**
  * 
  * @author Kang-Woo Lee (ETRI)
  */
-class ChopNodeTracks implements ValueMapperWithKey<String, NodeTrack,
-												Iterable<OverlapAreaTagged<List<NodeTrack>>>> {
-	private final EventCollectingAggregation<TaggedTrack> m_aggregation;
+class NodeTrackWindower implements BiConsumer<String, NodeTrack> {
+	private final EventCollectingWindowAggregation<TaggedTrack> m_aggregation;
+	private final List<BiConsumer<String,List<NodeTrack>>> m_consumers = Lists.newArrayList();
 	
-	public ChopNodeTracks(HoppingWindowManager windowMgr) {
-		m_aggregation = new EventCollectingAggregation<>(windowMgr);
+	public NodeTrackWindower(HoppingWindowManager windowMgr) {
+		m_aggregation = new EventCollectingWindowAggregation<>(windowMgr);
+	}
+	
+	public void addOutputConsumer(BiConsumer<String,List<NodeTrack>> consumer) {
+		m_consumers.add(consumer);
 	}
 
 	@Override
-	public Iterable<OverlapAreaTagged<List<NodeTrack>>>
-	apply(String areaId, NodeTrack track) {
+	public void accept(String areaId, NodeTrack track) {
 		List<Windowed<List<TaggedTrack>>> windoweds = m_aggregation.collect(new TaggedTrack(areaId, track));
-		
-		return FStream.from(windoweds)
-						.flatMapIterable(this::groupByArea)
-						.toList();
+		FStream.from(windoweds)
+				.flatMapIterable(this::groupByArea)
+				.forEach(tagged -> {
+					m_consumers.forEach(c -> c.accept(tagged.areaId(), tagged.value()));
+				});
 	}
 	
 	private List<OverlapAreaTagged<List<NodeTrack>>>

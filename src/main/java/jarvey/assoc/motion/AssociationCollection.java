@@ -17,6 +17,7 @@ import utils.func.Tuple;
 import utils.stream.FStream;
 
 import jarvey.assoc.Association;
+import jarvey.assoc.AssociationClosure;
 import jarvey.streams.model.TrackletId;
 
 
@@ -169,14 +170,6 @@ public class AssociationCollection<T extends Association> implements Iterable<T>
 			m_associations.add(assoc);
 			return true;
 		}
-		
-//		// FIXME: 나중에 삭제할 것
-//		if ( assoc.getTimestamp() == 21400 ) {
-//			System.out.print("");
-//		}
-////		if ( assoc.containsTracklet(TrackletId.fromString("etri:04[3]")) ) {
-////			System.out.print("");
-////		}
 		
 		// 새로 삽입할 association에 포함된 tracklet들 중 일부라도 동일한 tracklet을
 		// 가진 association들을 구한다.

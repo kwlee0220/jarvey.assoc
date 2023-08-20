@@ -4,9 +4,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiConsumer;
 
-import org.apache.kafka.streams.kstream.ValueTransformer;
-import org.apache.kafka.streams.processor.ProcessorContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -18,51 +17,43 @@ import utils.func.Either;
 import utils.func.Funcs;
 import utils.stream.FStream;
 
+import jarvey.assoc.AssociationClosure;
+import jarvey.assoc.AssociationClosure.Extension;
 import jarvey.assoc.BinaryAssociation;
 import jarvey.assoc.OverlapAreaRegistry;
-import jarvey.assoc.motion.AssociationClosure.Extension;
-import jarvey.streams.model.NodeTrack;
 import jarvey.streams.model.TrackletDeleted;
 import jarvey.streams.model.TrackletId;
+import jarvey.streams.node.NodeTrack;
 
 
 /**
  * 
  * @author Kang-Woo Lee (ETRI)
  */
-public class AssociationClosureBuilder
-		implements ValueTransformer<OverlapAreaTagged<List<NodeTrack>>,
-											Iterable<AssociationClosure>> {
+public class AssociationClosureBuilder implements BiConsumer<String, List<NodeTrack>> {
 	private static final Logger s_logger = LoggerFactory.getLogger(AssociationClosureBuilder.class);
 	private static final boolean KEEP_BEST_ASSOCIATION_ONLY = false;
 	
-	private final MotionBasedTrackAssociator m_associator;
+	private final BinaryTrackAssociator m_associator;
 	private Map<String,AssociationCollection<AssociationClosure>> m_cache = Maps.newHashMap();
+	private final List<BiConsumer<String,AssociationClosure>> m_consumers = Lists.newArrayList();
 	
 	public AssociationClosureBuilder(OverlapAreaRegistry registry, double trackDistanceThreshold) {
-		m_associator = new MotionBasedTrackAssociator(registry, trackDistanceThreshold);
+		m_associator = new BinaryTrackAssociator(registry, trackDistanceThreshold, "test");
 		m_cache = Maps.newHashMap();
 	}
-
-	@Override
-	public void init(ProcessorContext context) {
-	}
-
-	@Override
-	public void close() {}
 	
 	public Map<String,AssociationCollection<AssociationClosure>> getClosureCollections() {
 		return m_cache;
 	}
+	
+	public void addOutputConsumer(BiConsumer<String,AssociationClosure> consumer) {
+		m_consumers.add(consumer);
+	}
 
 	@Override
-	public Iterable<AssociationClosure>
-	transform(OverlapAreaTagged<List<NodeTrack>> areaTaggedTracks) {
-		String areaId = areaTaggedTracks.areaId();
-		List<NodeTrack> bucket = areaTaggedTracks.value();
-		
-		List<AssociationClosure> fullyClosedAssociations = Lists.newArrayList();
-		for ( Either<BinaryAssociation,TrackletDeleted> either: m_associator.apply(areaId, bucket) ) {
+	public void accept(String areaId, List<NodeTrack> bucket) {
+		for ( Either<BinaryAssociation,TrackletDeleted> either: m_associator.transform(areaId, bucket) ) {
 			if ( either.isRight() ) {
 				TrackletDeleted deleted = either.getRight();
 				
@@ -71,18 +62,27 @@ public class AssociationClosureBuilder
 					Set<TrackletId> closedTracklets = FStream.from(fixedClosures)
 															.flatMapIterable(cl -> cl.getTracklets())
 															.toSet();
+					
+					// 최종적으로 선택된 association closure에 포함된 tracklet들과 연관된
+					// 모든 binary association들을 제거한다.
 					m_associator.purgeClosedBinaryAssociation(closedTracklets);
+					
+					// dangling tracklet들을 찾아 제거하고, 이에 해당하는 dangling association closure를
+					// 생성/추가한다.
+					FStream.from(m_associator.removeDanglingClosedTracklets())
+							.map(ev -> AssociationClosure.singleton(ev.getTrackletId(), ev.getTimestamp()))
+							.forEach(fixedClosures::add);
+					
+					FStream.from(fixedClosures)
+							.sort(AssociationClosure::getTimestamp)
+							.forEach(closure -> m_consumers.forEach(c -> c.accept(areaId, closure)));
 				}
-				fullyClosedAssociations.addAll(fixedClosures);
 			}
 			else {
 				BinaryAssociation assoc = either.getLeft();
 				List<AssociationClosure> extendedClosures = extend(areaId, assoc);
 			}
 		}
-		
-		return fullyClosedAssociations;
-		
 	}
 	
 	private List<AssociationClosure> extend(String areaId, BinaryAssociation assoc) {
@@ -91,7 +91,7 @@ public class AssociationClosureBuilder
 		
 		List<AssociationClosure> matchingClosures = Funcs.removeIf(collection, assoc::intersectsTracklet);
 		if ( matchingClosures.isEmpty() ) {
-			AssociationClosure init = AssociationClosure.from(assoc);
+			AssociationClosure init = AssociationClosure.from(Arrays.asList(assoc));
 			collection.add(init);
 			return Arrays.asList(init);
 		}
@@ -128,19 +128,21 @@ public class AssociationClosureBuilder
 		
 		final Set<TrackletId> closedTracklets = m_associator.getClosedTracklets();
 		
-		// 주어진 tracklet의 delete로 인해 해당 tracklet에 보유한 closure들 중에서
-		// 자신에 포함된 모든 tracklet가 close된 closure를 검색한다.
+		// 주어진 tracklet의 delete로 인해 해당 tracklet과 연관된 association들 중에서
+		// fully closed된 association만 뽑는다.
 		List<AssociationClosure> fullyCloseds
 				= Funcs.filter(collection, cl -> closedTracklets.containsAll(cl.getTracklets()));
+		// 뽑은 association들 중 일부는 서로 conflict한 것들이 있을 수 있기 때문에
+		// 이들 중에서 점수를 기준으로 conflict association들을 제거한 best association 집합을 구한다.
 		fullyCloseds = AssociationCollection.selectBestAssociations(fullyCloseds);
-		if ( fullyCloseds.size() > 0 ) { 
-			if ( s_logger.isDebugEnabled() ) {
-				for ( AssociationClosure cl: fullyCloseds ) {
-					s_logger.debug("fully-closed: {}", cl);
-				}
+		if ( s_logger.isDebugEnabled() && fullyCloseds.size() > 0 ) { 
+			for ( AssociationClosure cl: fullyCloseds ) {
+				s_logger.debug("fully-closed: {}", cl);
 			}
 		}
 		
+		// 만일 유지 중인 association들 중에서 fully-closed 상태가 아니지만,
+		// best association보다 superior한 것이 존재하면 해당 best association의 graduation을 대기시킴.
 		List<AssociationClosure> graduated = Lists.newArrayList();
 		while ( fullyCloseds.size() > 0 ) {
 			AssociationClosure closed = Funcs.removeFirst(fullyCloseds);
@@ -167,7 +169,7 @@ public class AssociationClosureBuilder
 		
 		// pending되어 있던 closure 중에서 삭제를 막고 있던 closure가 또 다른 fully-closed
 		// closure에 의해 삭제되었을 수도 있기 때문에, 삭제 여부를 확인한다.
-		if ( graduated.size() > 0 ) {
+		if ( graduated.size() > 0 && m_pendingFullClosers.size() > 0) {
 			Funcs.removeIf(m_pendingFullClosers, fc -> {
 				if ( collection.findSuperiorFirst(fc) == null ) {
 					graduate(collection, fc);

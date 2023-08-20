@@ -1,8 +1,7 @@
-package jarvey.assoc.motion;
+package jarvey.assoc;
 
 import static utils.Utilities.checkState;
 
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -13,14 +12,14 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.gson.annotations.SerializedName;
 
-import jarvey.assoc.Association;
-import jarvey.assoc.BinaryAssociation;
-import jarvey.streams.model.LocalTrack;
-import jarvey.streams.model.TrackletId;
 import utils.Indexed;
 import utils.func.Funcs;
 import utils.stream.FStream;
 import utils.stream.KeyedGroups;
+
+import jarvey.streams.model.Timestamped;
+import jarvey.streams.model.TrackletId;
+
 
 /**
  * 
@@ -32,33 +31,19 @@ public class AssociationClosure implements Association, Iterable<BinaryAssociati
 	private double m_score;
 	private long m_ts;
 	
-	public static class DAO {
-		@SerializedName("tracklets") private List<TrackletId> m_trackletIds;
-		@SerializedName("score") private double m_score;
-		@SerializedName("ts") private long m_ts;
-	}
-	public DAO toDao() {
-		DAO dao = new DAO();
-		dao.m_trackletIds = FStream.from(m_trackletIds).sort().toList();
-		dao.m_score = m_score;
-		dao.m_ts = m_ts;
-		
-		return dao;
-	}
-	
 	public static AssociationClosure from(Iterable<BinaryAssociation> supports) {
 		return new AssociationClosure(supports);
 	}
 	
-	public static AssociationClosure from(BinaryAssociation assoc) {
-		return new AssociationClosure(Arrays.asList(assoc));
+	public static AssociationClosure singleton(TrackletId trkId, long ts) {
+		return new AssociationClosure(trkId, ts);
 	}
 	
-	private AssociationClosure() {
-		m_trackletIds = Sets.newHashSet();
+	private AssociationClosure(TrackletId trkId, long ts) {
+		m_trackletIds = Collections.singleton(trkId);
 		m_supports = Collections.emptyList();
 		m_score = 0;
-		m_ts = -1;
+		m_ts = ts;
 	}
 	
 	private AssociationClosure(Iterable<BinaryAssociation> supports) {
@@ -84,6 +69,10 @@ public class AssociationClosure implements Association, Iterable<BinaryAssociati
 	@Override
 	public long getTimestamp() {
 		return m_ts;
+	}
+	
+	public boolean isSingleton() {
+		return m_trackletIds.size() == 1;
 	}
 	
 	@Override
@@ -127,11 +116,11 @@ public class AssociationClosure implements Association, Iterable<BinaryAssociati
 			m_closure = closure;
 		}
 		
-		ExtendType type() {
+		public ExtendType type() {
 			return m_type;
 		}
 		
-		AssociationClosure association() {
+		public AssociationClosure association() {
 			return m_closure;
 		}
 		
@@ -277,6 +266,47 @@ public class AssociationClosure implements Association, Iterable<BinaryAssociati
 									.mapToLong(BinaryAssociation::getTimestamp)
 									.maxMultiple();
 		return maxTses.isEmpty() ? -1 : maxTses.get(0); 
+	}
+	
+	public DAO toDao() {
+		DAO dao = new DAO();
+		dao.m_trackletIds = FStream.from(m_trackletIds).sort().toList();
+		dao.m_score = m_score;
+		dao.m_ts = m_ts;
+		
+		return dao;
+	}
+	
+	public static class DAO implements Timestamped {
+		@SerializedName("tracklets") private List<TrackletId> m_trackletIds;
+		@SerializedName("score") private double m_score;
+		@SerializedName("ts") private long m_ts;
+		
+		public List<TrackletId> getTrackletIds() {
+			return m_trackletIds;
+		}
+		
+		public double getScore() {
+			return m_score;
+		}
+		
+		public boolean isSingleton() {
+			return m_trackletIds.size() == 1;
+		}
+		
+		@Override
+		public long getTimestamp() {
+			return m_ts;
+		}
+		
+		@Override
+		public String toString() {
+			String idsStr = FStream.from(m_trackletIds)
+									.sort()
+									.map(TrackletId::toString)
+									.join('-');
+			return String.format("%s:%.2f#%d", idsStr, m_score, m_ts);
+		}
 	}
 
 	

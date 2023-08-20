@@ -1,113 +1,204 @@
 package jarvey.assoc.motion;
 
 
+import java.io.File;
 import java.time.Duration;
+import java.util.Properties;
 
 import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.Topology;
 import org.apache.kafka.streams.Topology.AutoOffsetReset;
 import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.Named;
-import org.apache.kafka.streams.kstream.Printed;
+import org.apache.kafka.streams.kstream.Predicate;
 import org.apache.kafka.streams.kstream.Produced;
-import org.apache.kafka.streams.state.Stores;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import jarvey.assoc.BinaryAssociation;
+import utils.UnitUtils;
+import utils.UsageHelp;
+import utils.func.Either;
+
+import jarvey.assoc.AssociationClosure;
+import jarvey.assoc.OverlapArea;
 import jarvey.assoc.OverlapAreaRegistry;
-import jarvey.streams.HoppingWindowManager;
+import jarvey.streams.KafkaParameters;
 import jarvey.streams.TrackTimestampExtractor;
 import jarvey.streams.model.GlobalTrack;
-import jarvey.streams.model.NodeTrack;
-import jarvey.streams.model.TrackletId;
+import jarvey.streams.node.NodeTrack;
 import jarvey.streams.serialization.json.GsonUtils;
+
+import picocli.CommandLine.Command;
+import picocli.CommandLine.Mixin;
+import picocli.CommandLine.Model.CommandSpec;
+import picocli.CommandLine.Option;
+import picocli.CommandLine.Spec;
 
 /**
  * 
  * @author Kang-Woo Lee (ETRI)
  */
-final class MotionBasedAssociatorTopologyBuilder {
-	private static final String TOPIC_OVERLAP_AREAS = "overlap-areas";
-	private static final String TOPIC_GLOBAL_TRACKS = "global-tracks";
+@Command(name="motion-based association",
+			parameterListHeading = "Parameters:%n",
+			optionListHeading = "Options:%n",
+			description="Motion-based NodeTrack association")
+final class MotionBasedAssociatorTopologyBuilder implements Runnable {
+	private static final Logger s_logger = LoggerFactory.getLogger(MotionBasedAssociatorMain.class);
+
+	private static final String APPLICATION_ID = "motion-associator";
+	private static final String TOPIC_NODE_TRACKS = "node-tracks-repartition";
+	private static final String TOPIC_GLOBAL_TRACKS = "global-tracks-overlap-tentative";
 	private static final String TOPIC_MOTION_ASSOCIATIONS = "motion-associations";
 	
-	private static final String STORE_MOTION_ASSOCIATION = "motion-associations";
-	
-	private static final AutoOffsetReset DEFAULT_OFFSET_RESET = AutoOffsetReset.LATEST;
-	private static final Duration WINDOW_SIZE = Duration.ofSeconds(1);
 	private static final TrackTimestampExtractor TS_EXTRACTOR = new TrackTimestampExtractor();
-	private static final double DEFAULT_TRACK_DISTANCE = 5;
+	private static final String STORE_BINARY_ASSOCIATIONS = "binary-associations";
+	private static final Duration DEFAULT_ASSOCIATION_INTERVAL = Duration.ofSeconds(1);
+	private static final double DEFAULT_TRACK_DISTANCE = UnitUtils.parseLengthInMeter("5m");
 	
-	private final OverlapAreaRegistry m_areas;
-	private AutoOffsetReset m_offsetReset = DEFAULT_OFFSET_RESET;
-	private Duration m_windowSize = WINDOW_SIZE;
-	private double m_trackDistance = DEFAULT_TRACK_DISTANCE;
+	@Spec private CommandSpec m_spec;
+	@Mixin private UsageHelp m_help;
+	@Mixin private KafkaParameters m_kafkaParams;
+
+	@Option(names={"--overlap-area"}, paramLabel="overlap-area-descriptor",
+			description="overlap area description file path.")
+	private String m_overlapAreaFilePath = "overlap_areas.yaml";
+
+	@Option(names={"--input"}, paramLabel="topic-name", description="input topic name")
+	private String m_inputTopic = TOPIC_NODE_TRACKS;
+
+	@Option(names={"--output-associations"}, paramLabel="topic-name",
+					description="output association topic. (default: motion-associations)")
+	private String m_outputAssocTopic = TOPIC_MOTION_ASSOCIATIONS;
+
+	@Option(names={"--output-tracks"}, paramLabel="topic-name",
+					description="output global-track topic. (default: global-tracks-overlap-tentative")
+	private String m_outputTrackTopic = TOPIC_GLOBAL_TRACKS;
 	
-	private AssociationClosureBuilder m_assocBuilder;
-	
-	MotionBasedAssociatorTopologyBuilder(OverlapAreaRegistry areas) {
-		m_areas = areas;
+	@Option(names={"--assoc-interval"}, paramLabel="interval",
+			description="Motion-based association interval (default: 1s).")
+	public void setAssociationInterval(String durationStr) {
+		m_assocInterval = Duration.ofMillis(UnitUtils.parseDuration(durationStr));
 	}
+	private Duration m_assocInterval = DEFAULT_ASSOCIATION_INTERVAL;
 	
-	public MotionBasedAssociatorTopologyBuilder withOffsetReset(AutoOffsetReset offsetReset) {
-		m_offsetReset = offsetReset;
+	@Option(names={"--max-track-distance"}, paramLabel="distance",
+			description="maximun distance difference allowance for a same track (default: 5m).")
+	public void setMaxTrackDistance(String distStr) {
+		m_maxTrackDistance = UnitUtils.parseLengthInMeter(distStr);
+	}
+	private double m_maxTrackDistance = DEFAULT_TRACK_DISTANCE;
+	
+	private OverlapAreaRegistry m_areaRegistry;
+	
+	public MotionBasedAssociatorTopologyBuilder setAutoOffsetReset(AutoOffsetReset reset) {
+		m_kafkaParams.setAutoOffsetReset(reset.toString());
 		return this;
 	}
 	
-	public MotionBasedAssociatorTopologyBuilder withinTrackDistance(double threshold) {
-		m_trackDistance = threshold;
-		return this;
+	@Override
+	public void run() {
+		try {
+			m_areaRegistry = OverlapAreaRegistry.load(new File(m_overlapAreaFilePath));
+			
+			if ( m_kafkaParams.getApplicationId() == null ) {
+				m_kafkaParams.setApplicationId(APPLICATION_ID);
+			}
+			
+			Topology topology = build();
+			
+			if ( s_logger.isInfoEnabled() ) {
+				s_logger.info("use Kafka servers: {}", m_kafkaParams.getBootstrapServers());
+				s_logger.info("use Kafka application: {}", m_kafkaParams.getApplicationId());
+			}
+			
+			Properties props = m_kafkaParams.toStreamProperties();
+			KafkaStreams streams = new KafkaStreams(topology, props);
+			Runtime.getRuntime().addShutdownHook(new Thread(streams::close));
+			
+			streams.start();
+		}
+		catch ( Exception e ) {
+			throw new RuntimeException(e);
+		}
 	}
 	
 	@SuppressWarnings("deprecation")
-	public Topology build() {
+	private Topology build() {
 		StreamsBuilder builder = new StreamsBuilder();
 		
-		builder.addStateStore(Stores.keyValueStoreBuilder(
-											Stores.persistentKeyValueStore(STORE_MOTION_ASSOCIATION),
-											GsonUtils.getSerde(TrackletId.class),
-											GsonUtils.getListSerde(BinaryAssociation.class)));
+//		builder.addStateStore(Stores.keyValueStoreBuilder(
+//											Stores.persistentKeyValueStore(STORE_BINARY_ASSOCIATIONS),
+//											GsonUtils.getSerde(TrackletId.class),
+//											GsonUtils.getListSerde(BinaryAssociation.class)));
 		
-		KStream<String,NodeTrack> repartitioned = builder
-			// 'node-tracks' topic에 node track event들을 읽는다.
-			.stream(TOPIC_OVERLAP_AREAS,
-					Consumed.with(Serdes.String(), GsonUtils.getSerde(NodeTrack.class))
-							.withName("source-overlap-areas")
-							.withTimestampExtractor(TS_EXTRACTOR)
-							.withOffsetResetPolicy(m_offsetReset));
-
-		HoppingWindowManager windowMgr = HoppingWindowManager.ofWindowSize(m_windowSize);
-		ChopNodeTracks chopper = new ChopNodeTracks(windowMgr);
-		DropTooFarTracks filterFarTracks = new DropTooFarTracks(m_areas);
+		@SuppressWarnings({ "unchecked", "unused" })
+		KStream<String, Either<AssociationClosure,GlobalTrack>>[] branches
+			= builder
+				.stream(m_inputTopic,
+						Consumed.with(Serdes.String(), GsonUtils.getSerde(NodeTrack.class))
+								.withName("from-node-tracks")
+								.withTimestampExtractor(TS_EXTRACTOR)
+								.withOffsetResetPolicy(m_kafkaParams.getAutoOffsetReset()))
+				.filter(this::withAreaDistance)
+				.flatTransform(this::createAssociator, Named.as("motion-association-builder"))
+				.branch(s_toAssociationBranch, s_toGlobalTrackBranch);
 		
-		repartitioned
-			.flatMapValues(chopper, Named.as("chop-and-group-node-tracks"))
-			.mapValues(filterFarTracks, Named.as("drop-far-tracks"))
-			.flatTransformValues(this::createAssociationBuilder, Named.as("motion-association-builder"))
-			.mapValues(AssociationClosure::toDao)
-			.to(TOPIC_MOTION_ASSOCIATIONS,
-					Produced.with(Serdes.String(), GsonUtils.getSerde(AssociationClosure.DAO.class))
-							.withName("sink-motion-associations"));
+		branches[0]
+			.mapValues(either -> either.getLeft().toDao())
+			.to(m_outputAssocTopic,
+				Produced.with(Serdes.String(), GsonUtils.getSerde(AssociationClosure.DAO.class))
+						.withName("to-motion-associations"));
 		
-		repartitioned
-			.flatMapValues(createGlobalTrackGenerator(), Named.as("global-track-generator"))
-			.to(TOPIC_GLOBAL_TRACKS,
-					Produced.with(Serdes.String(), GsonUtils.getSerde(GlobalTrack.class))
-							.withName("sink-global-tracks"));
+		branches[1]
+			.mapValues(either -> either.getRight())
+			.to(m_outputTrackTopic,
+				Produced.with(Serdes.String(), GsonUtils.getSerde(GlobalTrack.class))
+						.withName("to-global-tracks"));
 		
 		return builder.build();
 	}
 	
-	private AssociationClosureBuilder createAssociationBuilder() {
-		if ( m_assocBuilder == null ) {
-			m_assocBuilder = new AssociationClosureBuilder(m_areas, m_trackDistance);
-		}
-		
-		return m_assocBuilder;
+	private MotionBasedAssociateTransformer createAssociator() {
+		return new MotionBasedAssociateTransformer(m_areaRegistry, m_assocInterval, m_maxTrackDistance,
+														STORE_BINARY_ASSOCIATIONS);
 	}
 	
-	private GlobalTrackGenerator createGlobalTrackGenerator() {
-		return new GlobalTrackGenerator(m_areas, createAssociationBuilder().getClosureCollections());
+	private boolean withAreaDistance(String areaId, NodeTrack track) {
+		if ( areaId == null ) {
+			return false;
+		}
+		
+		if ( track.isDeleted() ) {
+			return true;
+		}
+		else {
+			OverlapArea area = m_areaRegistry.get(areaId);
+			double threshold = area.getDistanceThreshold(track.getNodeId());
+			if ( track.getDistance() <= threshold ) {
+				return true;
+			}
+			else {
+				return false;
+			}
+		}
 	}
+	
+	private static Predicate<String,Either<AssociationClosure,GlobalTrack>> s_toAssociationBranch
+		= new Predicate<String,Either<AssociationClosure,GlobalTrack>>() {
+			@Override
+			public boolean test(String areaId, Either<AssociationClosure, GlobalTrack> either) {
+				return either.isLeft();
+			}
+		};
+	
+	private static Predicate<String,Either<AssociationClosure,GlobalTrack>> s_toGlobalTrackBranch
+		= new Predicate<String,Either<AssociationClosure,GlobalTrack>>() {
+			@Override
+			public boolean test(String areaId, Either<AssociationClosure, GlobalTrack> either) {
+				return either.isRight();
+			}
+		};
 }

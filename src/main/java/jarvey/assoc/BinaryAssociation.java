@@ -14,46 +14,55 @@ import jarvey.streams.model.TrackletId;
  * @author Kang-Woo Lee (ETRI)
  */
 public final class BinaryAssociation implements Association {
-	@SerializedName("left_track") private TrackletId m_leftTrackId;
-	@SerializedName("right_track") private TrackletId m_rightTrackId;
+	@SerializedName("left") private TimedTracklet m_left;
+	@SerializedName("right") private TimedTracklet m_right;
 	@SerializedName("score") private double m_score;
-	@SerializedName("left_ts") private long m_leftTs;
-	@SerializedName("right_ts") private long m_rightTs;
+//	@SerializedName("left_track") private TrackletId m_leftTrackId;
+//	@SerializedName("right_track") private TrackletId m_rightTrackId;
+//	@SerializedName("score") private double m_score;
+//	@SerializedName("left_ts") private long m_leftTs;
+//	@SerializedName("right_ts") private long m_rightTs;
+	
+	private static class TimedTracklet {
+		@SerializedName("tracklet") private TrackletId m_tracklet;
+		@SerializedName("ts") private long m_ts;
+		
+		TimedTracklet(TrackletId trkId, long ts) {
+			m_tracklet = trkId;
+			m_ts = ts;
+		}
+	}
 	
 	public BinaryAssociation(TrackletId left, TrackletId right, double score, long leftTs, long rightTs) {
 		if ( left.compareTo(right) < 0 ) {
-			m_leftTrackId = left;
-			m_rightTrackId = right;
-			m_leftTs = leftTs;
-			m_rightTs = rightTs;
+			m_left = new TimedTracklet(left, leftTs);
+			m_right = new TimedTracklet(right, rightTs);
 		}
 		else {
-			m_leftTrackId = right;
-			m_rightTrackId = left;
-			m_leftTs = rightTs;
-			m_rightTs = leftTs;
+			m_right = new TimedTracklet(left, leftTs);
+			m_left = new TimedTracklet(right, rightTs);
 		}
 		m_score = score;
 	}
 
 	@Override
 	public Set<TrackletId> getTracklets() {
-		return Sets.newHashSet(m_leftTrackId, m_rightTrackId);
+		return Sets.newHashSet(m_left.m_tracklet, m_right.m_tracklet);
 	}
 	
 	public TrackletId getLeftTrackId() {
-		return m_leftTrackId;
+		return m_left.m_tracklet;
 	}
 	
 	public TrackletId getRightTrackId() {
-		return m_rightTrackId;
+		return m_right.m_tracklet;
 	}
 	
 	public int indexOf(TrackletId trkId) {
-		if ( m_leftTrackId.equals(trkId) ) {
+		if ( m_left.m_tracklet.equals(trkId) ) {
 			return 0;
 		}
-		else if ( m_rightTrackId.equals(trkId) ) {
+		else if ( m_right.m_tracklet.equals(trkId) ) {
 			return 1;
 		}
 		else {
@@ -71,26 +80,26 @@ public final class BinaryAssociation implements Association {
 	}
 	
 	public long getLeftTimestamp() {
-		return m_leftTs;
+		return m_left.m_ts;
 	}
 	
 	public long getRightTimestamp() {
-		return m_rightTs;
+		return m_right.m_ts;
 	}
 	
 	@Override
 	public long getTimestamp() {
-		return Math.max(m_leftTs, m_rightTs);
+		return Math.max(getLeftTimestamp(), getRightTimestamp());
 	}
 
 	public boolean match(BinaryAssociation other) {
-		return Objects.equals(m_leftTrackId, other.m_leftTrackId)
-				&& Objects.equals(m_rightTrackId, other.m_rightTrackId);
+		return Objects.equals(getLeftTrackId(), other.getLeftTrackId())
+				&& Objects.equals(getRightTrackId(), other.getRightTrackId());
 	}
 	
 	@Override
 	public BinaryAssociation removeTracklet(TrackletId trkId) {
-		if ( m_leftTrackId.equals(trkId) || m_rightTrackId.equals(trkId) ) {
+		if ( getLeftTrackId().equals(trkId) || getRightTrackId().equals(trkId) ) {
 			return null;
 		}
 		else {
@@ -100,7 +109,7 @@ public final class BinaryAssociation implements Association {
 	
 	@Override
 	public int hashCode() {
-		return Objects.hash(m_leftTrackId, m_rightTrackId, m_score, m_leftTs, m_rightTs);
+		return Objects.hash(getLeftTrackId(), getRightTrackId(), m_score, getLeftTimestamp(), getRightTimestamp());
 	}
 	
 	@Override
@@ -114,16 +123,16 @@ public final class BinaryAssociation implements Association {
 		
 		BinaryAssociation other = (BinaryAssociation)obj;
 		
-		return m_leftTrackId.equals(other.m_leftTrackId)
-				&& m_rightTrackId.equals(other.m_rightTrackId)
+		return getLeftTrackId().equals(other.getLeftTrackId())
+				&& getRightTrackId().equals(other.getRightTrackId())
 				&& Double.compare(m_score, other.m_score) == 0
-				&& m_leftTs == other.m_leftTs
-				&& m_rightTs == other.m_rightTs;
+				&& getLeftTimestamp() == other.getLeftTimestamp()
+				&& getRightTimestamp() == other.getRightTimestamp();
 	}
 	
 	@Override
 	public String toString() {
 		return String.format("%s-%s:%.2f#%d",
-								m_leftTrackId, m_rightTrackId, m_score, getTimestamp());
+							getLeftTrackId(), getRightTrackId(), m_score, getTimestamp());
 	}
 }

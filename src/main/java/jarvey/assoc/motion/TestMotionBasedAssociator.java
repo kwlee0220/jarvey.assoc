@@ -3,9 +3,9 @@ package jarvey.assoc.motion;
 import java.io.File;
 import java.time.Duration;
 import java.util.Arrays;
-import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.function.BiConsumer;
 
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -22,16 +22,19 @@ import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.apache.kafka.streams.KeyValue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import utils.UnitUtils;
+import utils.func.Either;
 import utils.func.Unchecked;
 
+import jarvey.assoc.AssociationClosure;
+import jarvey.assoc.OverlapArea;
 import jarvey.assoc.OverlapAreaRegistry;
-import jarvey.streams.HoppingWindowManager;
 import jarvey.streams.model.GlobalTrack;
-import jarvey.streams.model.NodeTrack;
+import jarvey.streams.node.NodeTrack;
 import jarvey.streams.serialization.json.GsonUtils;
 
 /**
@@ -41,9 +44,9 @@ import jarvey.streams.serialization.json.GsonUtils;
 public class TestMotionBasedAssociator {
 	private static final Logger s_logger = LoggerFactory.getLogger(TestMotionBasedAssociator.class.getPackage().getName());
 
-	private static final String TOPIC_INPUT = "overlap-areas";
+	private static final String TOPIC_INPUT = "node-tracks";
 	private static final String TOPIC_NON_OVERLAP_AREAS = "non_overlap_areas";
-	private static final String TOPIC_MOTION_ASSOCIATION = "motion_associations";
+	private static final String TOPIC_MOTION_ASSOCIATION = "motion-associations";
 	private static final String STORE_BINARY_ASSOCIATIONS = "binary_associations";
 	
 	private static final Duration WINDOW_SIZE = Duration.ofSeconds(1);
@@ -67,7 +70,7 @@ public class TestMotionBasedAssociator {
 		props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
 		props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
 		props.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, (int)UnitUtils.parseDuration("10s"));
-		props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, (int)UnitUtils.parseDuration("300s"));
+		props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, (int)UnitUtils.parseDuration("5m"));
 
 		final KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props);
 		
@@ -93,26 +96,42 @@ public class TestMotionBasedAssociator {
 		driver(consumer, topic, pollTimeout, areas, producer);
 	}
 	
+	private static class TopicPublisher<T> implements BiConsumer<String, T> {
+		private final KafkaProducer<String, byte[]> m_producer;
+		private final String m_topic;
+		private final Serializer<T> m_valueSerde;
+		
+		TopicPublisher(KafkaProducer<String, byte[]> producer, String topic, Serde<T> valueSerde) {
+			m_producer = producer;
+			m_topic = topic;
+			m_valueSerde = valueSerde.serializer();
+		}
+
+		@Override
+		public void accept(String key, T value) {
+			byte[] bytes = m_valueSerde.serialize(m_topic, value);
+			ProducerRecord<String,byte[]> closureRecord = new ProducerRecord<>(m_topic, key, bytes);
+			m_producer.send(closureRecord);
+		}
+		
+	}
+	
 	public static void driver(KafkaConsumer<String, byte[]> consumer, String topic, Duration pollTimeout,
 								OverlapAreaRegistry registry, KafkaProducer<String, byte[]> producer) {
-		HoppingWindowManager windowMgr = HoppingWindowManager.ofWindowSize(WINDOW_SIZE);
-		ChopNodeTracks chopper = new ChopNodeTracks(windowMgr);
-		DropTooFarTracks dropper = new DropTooFarTracks(registry);
-		AssociationClosureBuilder closureBuilder
-				= new AssociationClosureBuilder(registry, DEFAULT_TRACK_DISTANCE);
-		GlobalTrackGenerator glocator = new GlobalTrackGenerator(registry,
-																closureBuilder.getClosureCollections());
+		MotionBasedAssociateTransformer associator
+			= new MotionBasedAssociateTransformer(registry, WINDOW_SIZE, DEFAULT_TRACK_DISTANCE,
+														STORE_BINARY_ASSOCIATIONS);
+		
+		TopicPublisher<AssociationClosure.DAO> assocPublisher
+			= new TopicPublisher<>(producer, TOPIC_MOTION_ASSOCIATION,
+									GsonUtils.getSerde(AssociationClosure.DAO.class));
+		TopicPublisher<GlobalTrack> gtrackPublisher
+			= new TopicPublisher<>(producer, "global-tracks", GsonUtils.getSerde(GlobalTrack.class));
 		try {
 			consumer.subscribe(Arrays.asList(topic));
 			
 			Serde<NodeTrack> serde = GsonUtils.getSerde(NodeTrack.class);
 			Deserializer<NodeTrack> deser = serde.deserializer();
-			
-			Serde<GlobalTrack> gtrackSerde = GsonUtils.getSerde(GlobalTrack.class);
-			Serializer<GlobalTrack> gtrackSer = gtrackSerde.serializer();
-			
-			Serde<AssociationClosure.DAO> closureSerde = GsonUtils.getSerde(AssociationClosure.DAO.class);
-			Serializer<AssociationClosure.DAO> clSer = closureSerde.serializer();
 			
 			long lastOffset = -1;
 			while ( true ) {
@@ -124,30 +143,26 @@ public class TestMotionBasedAssociator {
 					NodeTrack track = deser.deserialize(record.topic(), record.value());
 //					System.out.println(track);
 					
-					for ( OverlapAreaTagged<List<NodeTrack>> bucket: chopper.apply(record.key(), track)) {
-//						System.out.println(bucket);
-						OverlapAreaTagged<List<NodeTrack>> closeBucket = dropper.apply(bucket);
-						String areaId = closeBucket.areaId();
-						
-						for ( AssociationClosure cl: closureBuilder.transform(closeBucket) ) {
-//							System.out.println("FINAL ASSOC: " + cl);
-							System.out.println(cl);
-							
-							byte[] bytes = clSer.serialize(TOPIC_MOTION_ASSOCIATION, cl.toDao());
-							ProducerRecord<String,byte[]> closureRecord
-								= new ProducerRecord<>(TOPIC_MOTION_ASSOCIATION, areaId, bytes);
-							producer.send(closureRecord);
-						}
+					OverlapArea area = registry.findByNodeId(record.key()).getOrNull();
+					String areaId = area.getId();
+					
+					if ( !track.isDeleted()
+						&& track.getDistance() > area.getDistanceThreshold(track.getNodeId()) ) {
+						continue;
 					}
 					
-					Iterable<GlobalTrack> gtracks = glocator.apply(record.key(), track);
-					for ( GlobalTrack gtrack: gtracks ) {
-//						System.out.println("\t" + gtrack);
+					for ( KeyValue<String,Either<AssociationClosure,GlobalTrack>> kv: associator.transform(areaId, track) ) {
+						String key = kv.key;
+						Either<AssociationClosure,GlobalTrack> either = kv.value;
 						
-						byte[] bytes = gtrackSer.serialize("global-tracks", gtrack);
-						ProducerRecord<String,byte[]> gtrackRecord
-										= new ProducerRecord<>("global-tracks", gtrack.getNodeId(), bytes);
-						producer.send(gtrackRecord);
+						if ( either.isLeft() ) {
+//							assocPublisher.accept(key, either.getLeft().toDao());
+							System.out.printf("%s: %s%n", key, either.getLeft());
+						}
+						else {
+//							gtrackPublisher.accept(key, either.getRight());
+//							System.out.printf("%s: %s%n", key, either.getRight());
+						}
 					}
 				}
 			}
