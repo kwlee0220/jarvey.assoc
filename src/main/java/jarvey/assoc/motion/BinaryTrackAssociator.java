@@ -1,11 +1,12 @@
 package jarvey.assoc.motion;
 
-import java.util.Collections;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.kafka.streams.kstream.ValueTransformerWithKey;
+import org.apache.kafka.streams.KeyValue;
+import org.apache.kafka.streams.kstream.Transformer;
 import org.apache.kafka.streams.processor.ProcessorContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,13 +16,14 @@ import com.google.common.collect.Maps;
 
 import utils.func.Either;
 import utils.func.Funcs;
-import utils.func.KeyValue;
 import utils.func.Tuple;
 import utils.stream.FStream;
 
 import jarvey.assoc.BinaryAssociation;
-import jarvey.assoc.OverlapArea;
-import jarvey.assoc.OverlapAreaRegistry;
+import jarvey.streams.EventCollectingWindowAggregation;
+import jarvey.streams.HoppingWindowManager;
+import jarvey.streams.Windowed;
+import jarvey.streams.model.Timestamped;
 import jarvey.streams.model.TrackletDeleted;
 import jarvey.streams.model.TrackletId;
 import jarvey.streams.node.NodeTrack;
@@ -31,25 +33,32 @@ import jarvey.streams.node.NodeTrack;
  * @author Kang-Woo Lee (ETRI)
  */
 class BinaryTrackAssociator
-		implements ValueTransformerWithKey<String, List<NodeTrack>,
-											Iterable<Either<BinaryAssociation,TrackletDeleted>>> {
+		implements Transformer<String, NodeTrack,
+								Iterable<KeyValue<String, Either<BinaryAssociation, TrackletDeleted>>>> {
 	private static final Logger s_logger = LoggerFactory.getLogger(BinaryTrackAssociator.class);
 	
-	private final OverlapAreaRegistry m_areaRegistry;
+	private final EventCollectingWindowAggregation<TaggedTrack> m_aggregation;
 	private double m_trackDistanceThreshold;
-	private AssociationCollection<BinaryAssociation> m_collection;
 	private final Map<TrackletId,TrackletDeleted> m_closedTracklets = Maps.newHashMap();
+
+	private AssociationCollection<BinaryAssociation> m_collection;
 	private final String m_storeName;
 	private BinaryAssociationStore m_store;
+	private final boolean m_useMockStore;
 	
-	public BinaryTrackAssociator(OverlapAreaRegistry registry, double trackDistanceThreshold,
-										String storeName) {
-		m_areaRegistry = registry;
+	public BinaryTrackAssociator(Duration splitInterval, double trackDistanceThreshold,
+								String storeName, boolean useMockStore) {
+		HoppingWindowManager windowMgr = HoppingWindowManager.ofWindowSize(splitInterval);
+		m_aggregation = new EventCollectingWindowAggregation<>(windowMgr);
+		
 		m_trackDistanceThreshold = trackDistanceThreshold;
 		m_collection = new AssociationCollection<>(false);
 		
 		m_storeName = storeName;
-		m_store = BinaryAssociationStore.createLocalStore(storeName);
+		if ( useMockStore ) {
+			m_store = BinaryAssociationStore.createLocalStore(storeName);
+		}
+		m_useMockStore = useMockStore;
 	}
 
 	@Override
@@ -58,6 +67,9 @@ class BinaryTrackAssociator
 
 	@Override
 	public void init(ProcessorContext context) {
+		if ( !m_useMockStore ) {
+			m_store = BinaryAssociationStore.fromStateStore(context, m_storeName);
+		}
 		m_collection = m_store.load();
 	}
 	
@@ -66,44 +78,53 @@ class BinaryTrackAssociator
 	}
 
 	@Override
-	public Iterable<Either<BinaryAssociation, TrackletDeleted>>
-	transform(String areaId, List<NodeTrack> bucket) {
-		if ( areaId == null ) {
-			// overlapped area에 포함되지 않는 node에서 생성된 track의 경우
-			// association될 수 없기 때문에 바로 empty list를 반환한다.
-			return Collections.emptyList();
+	public Iterable<KeyValue<String, Either<BinaryAssociation, TrackletDeleted>>>
+	transform(String areaId, NodeTrack track) {
+		List<KeyValue<String, Either<BinaryAssociation, TrackletDeleted>>> results = Lists.newArrayList();
+		
+		List<Windowed<List<TaggedTrack>>> windoweds = m_aggregation.collect(new TaggedTrack(areaId, track));
+		for ( KeyValue<String,List<NodeTrack>> keyedBucket: FStream.from(windoweds)
+																	.flatMapIterable(this::groupByArea) ) {
+			String bucketAreaId = keyedBucket.key;
+			List<NodeTrack> bucket = keyedBucket.value;
+			
+			List<Either<BinaryAssociation, TrackletDeleted>> output
+				= FStream.from(associate(bucket))
+						.flatMapNullable(this::updateStore)
+						.sort(either -> {
+							if ( either.isLeft() ) {
+								return either.getLeft().getTimestamp();
+							}
+							else {
+								return either.getRight().getTimestamp();
+							}
+						})
+						.toList();
+			if ( output.size() > 0 ) {
+				// 변경되거나 추가된 binary association을 store에 반영시킨다.
+				List<BinaryAssociation> newAssocList = FStream.from(output)
+																.flatMapOption(either -> either.left())
+																.toList();
+				m_store.updateAll(newAssocList);
+				
+				output.forEach(either -> results.add(KeyValue.pair(bucketAreaId, either)));
+			}
 		}
 		
-		OverlapArea area = m_areaRegistry.get(areaId);
-		if ( area == null ) {
-			s_logger.warn("unexpected area id: {}", areaId);
-			return Collections.emptyList();
-		}
-		
-		List<Either<BinaryAssociation, TrackletDeleted>> output
-				= FStream.from(associate(area, bucket))
-							.flatMapNullable(this::updateStore)
-							.sort(either -> {
-								if ( either.isLeft() ) {
-									return either.getLeft().getTimestamp();
-								}
-								else {
-									return either.getRight().getTimestamp();
-								}
-							})
-							.toList();
-		
-		// 변경되거나 추가된 binary association을 store에 반영시킨다.
-		List<BinaryAssociation> newAssocList = FStream.from(output)
-													.flatMapOption(either -> either.left())
-													.toList();
-		m_store.updateAll(newAssocList);
-		
-		return output;
+		return results;
+	}
+	
+	private List<KeyValue<String,List<NodeTrack>>>
+	groupByArea(Windowed<List<TaggedTrack>> wtaggeds) {
+		return FStream.from(wtaggeds.value())
+						.groupByKey(TaggedTrack::area, TaggedTrack::track)
+						.stream()
+						.map((a, bkt) -> KeyValue.pair(a, bkt))
+						.toList();
 	}
 	
 	private List<Either<BinaryAssociation,TrackletDeleted>>
-	associate(OverlapArea area, List<NodeTrack> tracks) {
+	associate(List<NodeTrack> tracks) {
 		List<Either<BinaryAssociation,TrackletDeleted>> outEvents = Lists.newArrayList();
 		
 		Map<TrackletId,TrackletDeleted> deleteds
@@ -160,14 +181,14 @@ class BinaryTrackAssociator
 		// close된 tracklet들 중에서 binary association이 없는 경우
 		// 해당 tracklet은 다른 tracklet과 association 없이 종료된 것으로
 		// 단일 association으로 구성된 closure를 생성한다.
-		List<KeyValue<TrackletId,TrackletDeleted>> danglings
+		List<utils.func.KeyValue<TrackletId,TrackletDeleted>> danglings
 				= Funcs.removeIf(m_closedTracklets,
 								(tid, ev) -> !Funcs.exists(m_collection, ba -> ba.containsTracklet(tid)));
 		if ( s_logger.isDebugEnabled() && danglings.size() > 0 ) {
 			danglings.forEach(trkId -> s_logger.debug("delete dangling tracklet: {}", trkId));
 		}
 		
-		return Funcs.map(danglings, KeyValue::value);
+		return Funcs.map(danglings, kv -> kv.value());
 	}
 	
 	private Either<BinaryAssociation,TrackletDeleted>
@@ -182,6 +203,29 @@ class BinaryTrackAssociator
 		}
 		else {
 			return ev;
+		}
+	}
+	
+	private static final class TaggedTrack implements Timestamped {
+		private final String m_areaId;
+		private final NodeTrack m_track;
+		
+		private TaggedTrack(String areaId, NodeTrack track) {
+			m_areaId = areaId;
+			m_track = track;
+		}
+		
+		public String area() {
+			return m_areaId;
+		}
+		
+		public NodeTrack track() {
+			return m_track;
+		}
+
+		@Override
+		public long getTimestamp() {
+			return m_track.getTimestamp();
 		}
 	}
 	

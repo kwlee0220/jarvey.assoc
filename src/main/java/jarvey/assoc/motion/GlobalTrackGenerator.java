@@ -1,10 +1,11 @@
 package jarvey.assoc.motion;
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.function.BiConsumer;
 
+import org.apache.kafka.streams.kstream.ValueMapperWithKey;
 import org.locationtech.jts.geom.Point;
 
 import com.google.common.collect.Lists;
@@ -17,7 +18,6 @@ import utils.stream.FStream;
 import utils.stream.KeyedGroups;
 
 import jarvey.assoc.AssociationClosure;
-import jarvey.assoc.OverlapAreaRegistry;
 import jarvey.streams.model.GlobalTrack;
 import jarvey.streams.model.LocalTrack;
 import jarvey.streams.model.TrackletId;
@@ -27,39 +27,37 @@ import jarvey.streams.node.NodeTrack;
  * 
  * @author Kang-Woo Lee (ETRI)
  */
-public class GlobalTrackGenerator implements BiConsumer<String, NodeTrack> {
+public class GlobalTrackGenerator implements ValueMapperWithKey<String, NodeTrack, Iterable<GlobalTrack>> {
 	private static final long INTERVAL = 100;
 
-	private final OverlapAreaRegistry m_areaRegistry;
-	private final Map<String,AssociationCollection<AssociationClosure>> m_collections;
+	private final MotionBasedAssociatorContext m_mbaContext;
+	private Map<String,AssociationCollection<AssociationClosure>> m_collections;
 	private Map<String, List<LocalTrack>> m_lastLocs = Maps.newHashMap();
-	private final List<BiConsumer<String,GlobalTrack>> m_consumers = Lists.newArrayList();
 	
-	public GlobalTrackGenerator(OverlapAreaRegistry registry,
-								Map<String,AssociationCollection<AssociationClosure>> collections) {
-		m_areaRegistry = registry;
-		m_collections = collections;
-	}
-	
-	public void addOutputConsumer(BiConsumer<String,GlobalTrack> consumer) {
-		m_consumers.add(consumer);
+	public GlobalTrackGenerator(MotionBasedAssociatorContext context) {
+		m_mbaContext = context;
 	}
 
 	@Override
-	public void accept(String areaId, NodeTrack ntrack) {
+	public Iterable<GlobalTrack> apply(String areaId, NodeTrack ntrack) {
 		LocalTrack ltrack = LocalTrack.from(ntrack);
 		if ( areaId == null ) {
 			// overlap area 이외의 장소에 설치된 카메라에서 추적된 이벤트인 경우에는
 			// 바로 global track을 생성한다.
 			GlobalTrack gtrack = ntrack.isDeleted()
 									? GlobalTrack.deleted(ltrack, null) : new GlobalTrack(ltrack, null);
-			m_consumers.forEach(c -> c.accept(areaId, gtrack));
+			return Collections.singleton(gtrack);
 		}
 		else {
+			if ( m_collections == null ) {
+				m_collections = m_mbaContext.getAssociationClosureBuilder().getClosureCollections();
+			}
+			
 			AssociationCollection<AssociationClosure> collection = m_collections.get(areaId);
 			if ( collection == null ) {
 				// 'areaId'에 해당하는 지역에 association이 전혀 없는 경우
-				m_consumers.forEach(c -> c.accept(areaId, new GlobalTrack(ltrack, areaId)));
+				GlobalTrack gtrack = new GlobalTrack(ltrack, areaId);
+				return Collections.singleton(gtrack);
 			}
 			else {
 				// 일정기간 동안 track을 모아서 한번에 처리하도록 한다. (예: 100ms)
@@ -71,7 +69,7 @@ public class GlobalTrackGenerator implements BiConsumer<String, NodeTrack> {
 				long ts = ltrack.getTimestamp();
 				List<LocalTrack> expiredTracks = Funcs.filter(bucket, lt -> (ts - lt.getTimestamp()) >= INTERVAL);
 				if ( expiredTracks.isEmpty() ) {
-					return;
+					return Collections.emptyList();
 				}
 				
 				List<AssociationClosure> bestAssocs = collection.getBestAssociations();
@@ -91,7 +89,7 @@ public class GlobalTrackGenerator implements BiConsumer<String, NodeTrack> {
 					m_lastLocs.remove(areaId);
 				}
 				
-				gtracks.forEach(gt -> m_consumers.forEach(c -> c.accept(areaId, gt)));
+				return gtracks;
 			}
 		}
 	}

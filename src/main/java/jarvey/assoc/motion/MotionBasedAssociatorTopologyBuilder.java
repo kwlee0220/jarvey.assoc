@@ -15,6 +15,7 @@ import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.Named;
 import org.apache.kafka.streams.kstream.Predicate;
 import org.apache.kafka.streams.kstream.Produced;
+import org.apache.kafka.streams.state.Stores;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -23,11 +24,14 @@ import utils.UsageHelp;
 import utils.func.Either;
 
 import jarvey.assoc.AssociationClosure;
+import jarvey.assoc.BinaryAssociation;
 import jarvey.assoc.OverlapArea;
 import jarvey.assoc.OverlapAreaRegistry;
 import jarvey.streams.KafkaParameters;
+import jarvey.streams.MockKeyValueStore;
 import jarvey.streams.TrackTimestampExtractor;
 import jarvey.streams.model.GlobalTrack;
+import jarvey.streams.model.TrackletId;
 import jarvey.streams.node.NodeTrack;
 import jarvey.streams.serialization.json.GsonUtils;
 
@@ -90,8 +94,12 @@ final class MotionBasedAssociatorTopologyBuilder implements Runnable {
 		m_maxTrackDistance = UnitUtils.parseLengthInMeter(distStr);
 	}
 	private double m_maxTrackDistance = DEFAULT_TRACK_DISTANCE;
+
+	@Option(names={"--use-mock-store"}, description="Use mocking state store (for test).")
+	private boolean m_useMockStateStore = false;
 	
 	private OverlapAreaRegistry m_areaRegistry;
+	private final MotionBasedAssociatorContext m_mbaContext = new MotionBasedAssociatorContext();
 	
 	public MotionBasedAssociatorTopologyBuilder setAutoOffsetReset(AutoOffsetReset reset) {
 		m_kafkaParams.setAutoOffsetReset(reset.toString());
@@ -129,31 +137,43 @@ final class MotionBasedAssociatorTopologyBuilder implements Runnable {
 	private Topology build() {
 		StreamsBuilder builder = new StreamsBuilder();
 		
-//		builder.addStateStore(Stores.keyValueStoreBuilder(
-//											Stores.persistentKeyValueStore(STORE_BINARY_ASSOCIATIONS),
-//											GsonUtils.getSerde(TrackletId.class),
-//											GsonUtils.getListSerde(BinaryAssociation.class)));
+		String[] binaryAssocStoreNames;
+		if ( m_useMockStateStore ) {
+			MockKeyValueStore<TrackletId,BinaryAssociationStore.Record> kvStore
+						= new MockKeyValueStore<>(STORE_BINARY_ASSOCIATIONS,
+													GsonUtils.getSerde(TrackletId.class),
+													GsonUtils.getSerde(BinaryAssociationStore.Record.class));
+			m_mbaContext.addMockKeyValueStore(STORE_BINARY_ASSOCIATIONS, kvStore);
+			binaryAssocStoreNames = new String[]{};
+		}
+		else {
+			builder.addStateStore(Stores.keyValueStoreBuilder(
+												Stores.persistentKeyValueStore(STORE_BINARY_ASSOCIATIONS),
+												GsonUtils.getSerde(TrackletId.class),
+												GsonUtils.getListSerde(BinaryAssociation.class)));
+			binaryAssocStoreNames = new String[]{STORE_BINARY_ASSOCIATIONS};
+		}
 		
-		@SuppressWarnings({ "unchecked", "unused" })
-		KStream<String, Either<AssociationClosure,GlobalTrack>>[] branches
-			= builder
+		KStream<String,NodeTrack> validNodeTracks =
+			builder
 				.stream(m_inputTopic,
 						Consumed.with(Serdes.String(), GsonUtils.getSerde(NodeTrack.class))
 								.withName("from-node-tracks")
 								.withTimestampExtractor(TS_EXTRACTOR)
 								.withOffsetResetPolicy(m_kafkaParams.getAutoOffsetReset()))
-				.filter(this::withAreaDistance)
-				.flatTransform(this::createAssociator, Named.as("motion-association-builder"))
-				.branch(s_toAssociationBranch, s_toGlobalTrackBranch);
+				.filter(this::withAreaDistance, Named.as("filter-valid-node-tracks"));
 		
-		branches[0]
-			.mapValues(either -> either.getLeft().toDao())
+		validNodeTracks
+			.flatTransform(this::createBinaryAssociator,
+									Named.as("binary-association"), binaryAssocStoreNames)
+			.flatTransformValues(this::createClosureBuilder, Named.as("closure-builder"))
+			.mapValues(AssociationClosure::toDao)
 			.to(m_outputAssocTopic,
 				Produced.with(Serdes.String(), GsonUtils.getSerde(AssociationClosure.DAO.class))
 						.withName("to-motion-associations"));
 		
-		branches[1]
-			.mapValues(either -> either.getRight())
+		validNodeTracks
+			.flatMapValues(new GlobalTrackGenerator(m_mbaContext), Named.as("generate-global-tracks"))
 			.to(m_outputTrackTopic,
 				Produced.with(Serdes.String(), GsonUtils.getSerde(GlobalTrack.class))
 						.withName("to-global-tracks"));
@@ -161,9 +181,17 @@ final class MotionBasedAssociatorTopologyBuilder implements Runnable {
 		return builder.build();
 	}
 	
-	private MotionBasedAssociateTransformer createAssociator() {
-		return new MotionBasedAssociateTransformer(m_areaRegistry, m_assocInterval, m_maxTrackDistance,
-														STORE_BINARY_ASSOCIATIONS);
+	private BinaryTrackAssociator createBinaryAssociator() {
+		BinaryTrackAssociator ba = new BinaryTrackAssociator(m_assocInterval, m_maxTrackDistance,
+														STORE_BINARY_ASSOCIATIONS, m_useMockStateStore);
+		m_mbaContext.setBinaryTrackAssociator(ba);
+		return ba;
+	}
+	
+	private AssociationClosureBuilder createClosureBuilder() {
+		AssociationClosureBuilder builder = new AssociationClosureBuilder(m_mbaContext);
+		m_mbaContext.setAssociationClosureBuilder(builder);
+		return builder;
 	}
 	
 	private boolean withAreaDistance(String areaId, NodeTrack track) {
@@ -174,16 +202,10 @@ final class MotionBasedAssociatorTopologyBuilder implements Runnable {
 		if ( track.isDeleted() ) {
 			return true;
 		}
-		else {
-			OverlapArea area = m_areaRegistry.get(areaId);
-			double threshold = area.getDistanceThreshold(track.getNodeId());
-			if ( track.getDistance() <= threshold ) {
-				return true;
-			}
-			else {
-				return false;
-			}
-		}
+		
+		OverlapArea area = m_areaRegistry.get(areaId);
+		double threshold = area.getDistanceThreshold(track.getNodeId());
+		return track.getDistance() <= threshold;
 	}
 	
 	private static Predicate<String,Either<AssociationClosure,GlobalTrack>> s_toAssociationBranch

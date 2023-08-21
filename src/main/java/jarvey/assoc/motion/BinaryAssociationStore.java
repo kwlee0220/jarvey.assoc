@@ -41,7 +41,7 @@ class BinaryAssociationStore {
 	}
 	
 	public static BinaryAssociationStore createLocalStore(String storeName) {
-		KeyValueStore<TrackletId,Record> kvStore
+		KeyValueStore<TrackletId, Record> kvStore
 			= new MockKeyValueStore<>(storeName, GsonUtils.getSerde(TrackletId.class),
 										GsonUtils.getSerde(Record.class));
 		return new BinaryAssociationStore(kvStore);

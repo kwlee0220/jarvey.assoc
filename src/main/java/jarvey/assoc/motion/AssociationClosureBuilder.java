@@ -1,11 +1,13 @@
 package jarvey.assoc.motion;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.BiConsumer;
 
+import org.apache.kafka.streams.kstream.ValueTransformerWithKey;
+import org.apache.kafka.streams.processor.ProcessorContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -15,73 +17,90 @@ import com.google.common.collect.Sets;
 
 import utils.func.Either;
 import utils.func.Funcs;
+import utils.func.Lazy;
 import utils.stream.FStream;
 
 import jarvey.assoc.AssociationClosure;
 import jarvey.assoc.AssociationClosure.Extension;
 import jarvey.assoc.BinaryAssociation;
-import jarvey.assoc.OverlapAreaRegistry;
 import jarvey.streams.model.TrackletDeleted;
 import jarvey.streams.model.TrackletId;
-import jarvey.streams.node.NodeTrack;
 
 
 /**
  * 
  * @author Kang-Woo Lee (ETRI)
  */
-public class AssociationClosureBuilder implements BiConsumer<String, List<NodeTrack>> {
+public class AssociationClosureBuilder
+	implements ValueTransformerWithKey<String, Either<BinaryAssociation,TrackletDeleted>,
+										Iterable<AssociationClosure>> {
 	private static final Logger s_logger = LoggerFactory.getLogger(AssociationClosureBuilder.class);
 	private static final boolean KEEP_BEST_ASSOCIATION_ONLY = false;
 	
-	private final BinaryTrackAssociator m_associator;
-	private Map<String,AssociationCollection<AssociationClosure>> m_cache = Maps.newHashMap();
-	private final List<BiConsumer<String,AssociationClosure>> m_consumers = Lists.newArrayList();
+	private final MotionBasedAssociatorContext m_mbaContext;
+	private final Lazy<BinaryTrackAssociator> m_associator;
+	private final Map<String,AssociationCollection<AssociationClosure>> m_cache = Maps.newHashMap();
 	
-	public AssociationClosureBuilder(OverlapAreaRegistry registry, double trackDistanceThreshold) {
-		m_associator = new BinaryTrackAssociator(registry, trackDistanceThreshold, "test");
-		m_cache = Maps.newHashMap();
+	public AssociationClosureBuilder(MotionBasedAssociatorContext context) {
+		m_mbaContext = context;
+		m_associator = Lazy.of(this::getBinaryTrackAssociator);
+	}
+	
+	private BinaryTrackAssociator getBinaryTrackAssociator() {
+		return m_mbaContext.getBinaryTrackAssociator();
+	}
+
+	@Override
+	public void init(ProcessorContext context) {
+	}
+
+	@Override
+	public void close() {
 	}
 	
 	public Map<String,AssociationCollection<AssociationClosure>> getClosureCollections() {
 		return m_cache;
 	}
-	
-	public void addOutputConsumer(BiConsumer<String,AssociationClosure> consumer) {
-		m_consumers.add(consumer);
-	}
 
 	@Override
-	public void accept(String areaId, List<NodeTrack> bucket) {
-		for ( Either<BinaryAssociation,TrackletDeleted> either: m_associator.transform(areaId, bucket) ) {
-			if ( either.isRight() ) {
-				TrackletDeleted deleted = either.getRight();
-				
-				List<AssociationClosure> fixedClosures = handleTrackDeleted(areaId, deleted);
-				if ( fixedClosures.size() > 0 ) {
-					Set<TrackletId> closedTracklets = FStream.from(fixedClosures)
-															.flatMapIterable(cl -> cl.getTracklets())
-															.toSet();
-					
-					// 최종적으로 선택된 association closure에 포함된 tracklet들과 연관된
-					// 모든 binary association들을 제거한다.
-					m_associator.purgeClosedBinaryAssociation(closedTracklets);
-					
-					// dangling tracklet들을 찾아 제거하고, 이에 해당하는 dangling association closure를
-					// 생성/추가한다.
-					FStream.from(m_associator.removeDanglingClosedTracklets())
-							.map(ev -> AssociationClosure.singleton(ev.getTrackletId(), ev.getTimestamp()))
-							.forEach(fixedClosures::add);
-					
-					FStream.from(fixedClosures)
+	public Iterable<AssociationClosure> transform(String areaId,
+													Either<BinaryAssociation, TrackletDeleted> either) {
+		if ( either.isLeft() ) {
+			process(areaId, either.getLeft());
+			return Collections.emptyList();
+		}
+		else {
+			return process(areaId, either.getRight());
+		}
+	}
+	
+	private void process(String areaId, BinaryAssociation assoc) {
+		List<AssociationClosure> extendedClosures = extend(areaId, assoc);
+	}
+	
+	private List<AssociationClosure> process(String areaId, TrackletDeleted deleted) {
+		List<AssociationClosure> fixedClosures = handleTrackDeleted(areaId, deleted);
+		if ( fixedClosures.size() > 0 ) {
+			Set<TrackletId> closedTracklets = FStream.from(fixedClosures)
+													.flatMapIterable(cl -> cl.getTracklets())
+													.toSet();
+			
+			// 최종적으로 선택된 association closure에 포함된 tracklet들과 연관된
+			// 모든 binary association들을 제거한다.
+			m_associator.get().purgeClosedBinaryAssociation(closedTracklets);
+			
+			// dangling tracklet들을 찾아 제거하고, 이에 해당하는 dangling association closure를
+			// 생성/추가한다.
+			FStream.from(m_associator.get().removeDanglingClosedTracklets())
+					.map(ev -> AssociationClosure.singleton(ev.getTrackletId(), ev.getTimestamp()))
+					.forEach(fixedClosures::add);
+			
+			return FStream.from(fixedClosures)
 							.sort(AssociationClosure::getTimestamp)
-							.forEach(closure -> m_consumers.forEach(c -> c.accept(areaId, closure)));
-				}
-			}
-			else {
-				BinaryAssociation assoc = either.getLeft();
-				List<AssociationClosure> extendedClosures = extend(areaId, assoc);
-			}
+							.toList();
+		}
+		else {
+			return Collections.emptyList();
 		}
 	}
 	
@@ -126,7 +145,7 @@ public class AssociationClosureBuilder implements BiConsumer<String, List<NodeTr
 		final AssociationCollection<AssociationClosure> collection
 			= m_cache.computeIfAbsent(areaId, k -> new AssociationCollection<>(KEEP_BEST_ASSOCIATION_ONLY));
 		
-		final Set<TrackletId> closedTracklets = m_associator.getClosedTracklets();
+		final Set<TrackletId> closedTracklets = m_associator.get().getClosedTracklets();
 		
 		// 주어진 tracklet의 delete로 인해 해당 tracklet과 연관된 association들 중에서
 		// fully closed된 association만 뽑는다.
