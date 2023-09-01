@@ -25,6 +25,7 @@ public class OverlapArea {
 	private final Map<String,Double> m_distanceThresholds = Maps.newHashMap();
 	private final Set<String> m_nodes = Sets.newHashSet();
 	
+	@SuppressWarnings("unchecked")
 	public static OverlapArea parse(Map<String,Object> entries) {
 		OverlapArea area = new OverlapArea((String)entries.get("id"));
 		

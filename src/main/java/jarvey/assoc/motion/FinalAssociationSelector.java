@@ -1,13 +1,10 @@
 package jarvey.assoc.motion;
 
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.kafka.streams.kstream.ValueTransformerWithKey;
-import org.apache.kafka.streams.processor.ProcessorContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -15,14 +12,13 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 
-import utils.func.Either;
 import utils.func.Funcs;
-import utils.func.Lazy;
 import utils.stream.FStream;
 
-import jarvey.assoc.AssociationClosure;
-import jarvey.assoc.AssociationClosure.Extension;
-import jarvey.assoc.BinaryAssociation;
+import jarvey.assoc.AssociationCollection;
+import jarvey.assoc.motion.MotionBasedAssociationContext.Session;
+import jarvey.streams.model.AssociationClosure;
+import jarvey.streams.model.BinaryAssociation;
 import jarvey.streams.model.TrackletDeleted;
 import jarvey.streams.model.TrackletId;
 
@@ -31,55 +27,22 @@ import jarvey.streams.model.TrackletId;
  * 
  * @author Kang-Woo Lee (ETRI)
  */
-public class AssociationClosureBuilder
-	implements ValueTransformerWithKey<String, Either<BinaryAssociation,TrackletDeleted>,
-										Iterable<AssociationClosure>> {
-	private static final Logger s_logger = LoggerFactory.getLogger(AssociationClosureBuilder.class);
-	private static final boolean KEEP_BEST_ASSOCIATION_ONLY = false;
+class FinalAssociationSelector {
+	private static final Logger s_logger = LoggerFactory.getLogger(FinalAssociationSelector.class);
 	
-	private final MotionBasedAssociatorContext m_mbaContext;
-	private final Lazy<BinaryTrackAssociator> m_associator;
-	private final Map<String,AssociationCollection<AssociationClosure>> m_cache = Maps.newHashMap();
+	private final Session m_session;
+	private final Map<TrackletId,TrackletDeleted> m_closedTracklets = Maps.newHashMap();
+	private final Set<AssociationClosure> m_pendingFullClosers = Sets.newHashSet();
 	
-	public AssociationClosureBuilder(MotionBasedAssociatorContext context) {
-		m_mbaContext = context;
-		m_associator = Lazy.of(this::getBinaryTrackAssociator);
-	}
-	
-	private BinaryTrackAssociator getBinaryTrackAssociator() {
-		return m_mbaContext.getBinaryTrackAssociator();
+	public FinalAssociationSelector(Session session) {
+		m_session = session;
 	}
 
-	@Override
-	public void init(ProcessorContext context) {
-	}
-
-	@Override
-	public void close() {
-	}
-	
-	public Map<String,AssociationCollection<AssociationClosure>> getClosureCollections() {
-		return m_cache;
-	}
-
-	@Override
-	public Iterable<AssociationClosure> transform(String areaId,
-													Either<BinaryAssociation, TrackletDeleted> either) {
-		if ( either.isLeft() ) {
-			process(areaId, either.getLeft());
-			return Collections.emptyList();
-		}
-		else {
-			return process(areaId, either.getRight());
-		}
-	}
-	
-	private void process(String areaId, BinaryAssociation assoc) {
-		List<AssociationClosure> extendedClosures = extend(areaId, assoc);
-	}
-	
-	private List<AssociationClosure> process(String areaId, TrackletDeleted deleted) {
-		List<AssociationClosure> fixedClosures = handleTrackDeleted(areaId, deleted);
+	public Iterable<AssociationClosure> select(TrackletDeleted deleted) {
+		m_closedTracklets.put(deleted.getTrackletId(), deleted);
+		m_session.getBinaryAssociationStore().markTrackletClosed(deleted.getTrackletId());
+		
+		List<AssociationClosure> fixedClosures = handleTrackDeleted(deleted);
 		if ( fixedClosures.size() > 0 ) {
 			Set<TrackletId> closedTracklets = FStream.from(fixedClosures)
 													.flatMapIterable(cl -> cl.getTracklets())
@@ -87,11 +50,11 @@ public class AssociationClosureBuilder
 			
 			// 최종적으로 선택된 association closure에 포함된 tracklet들과 연관된
 			// 모든 binary association들을 제거한다.
-			m_associator.get().purgeClosedBinaryAssociation(closedTracklets);
+			purgeClosedBinaryAssociation(closedTracklets);
 			
 			// dangling tracklet들을 찾아 제거하고, 이에 해당하는 dangling association closure를
 			// 생성/추가한다.
-			FStream.from(m_associator.get().removeDanglingClosedTracklets())
+			FStream.from(removeDanglingClosedTracklets())
 					.map(ev -> AssociationClosure.singleton(ev.getTrackletId(), ev.getTimestamp()))
 					.forEach(fixedClosures::add);
 			
@@ -103,54 +66,14 @@ public class AssociationClosureBuilder
 			return Collections.emptyList();
 		}
 	}
-	
-	private List<AssociationClosure> extend(String areaId, BinaryAssociation assoc) {
-		AssociationCollection<AssociationClosure> collection
-			= m_cache.computeIfAbsent(areaId, k -> new AssociationCollection<>(KEEP_BEST_ASSOCIATION_ONLY));
 		
-		List<AssociationClosure> matchingClosures = Funcs.removeIf(collection, assoc::intersectsTracklet);
-		if ( matchingClosures.isEmpty() ) {
-			AssociationClosure init = AssociationClosure.from(Arrays.asList(assoc));
-			collection.add(init);
-			return Arrays.asList(init);
-		}
-		else {
-			List<AssociationClosure> extendeds = Lists.newArrayList();
-			for ( AssociationClosure cl: matchingClosures ) {
-				Extension ext = cl.extend(assoc, !KEEP_BEST_ASSOCIATION_ONLY);
-				switch ( ext.type() ) {
-					case UNCHANGED:
-						collection.add(ext.association());
-						break;
-					case UPDATED:
-					case EXTENDED:
-						if ( collection.add(ext.association()) ) {
-							extendeds.add(ext.association());
-						}
-						break;
-					case CREATED:
-						collection.add(cl);
-						if ( collection.add(ext.association()) ) {
-							extendeds.add(ext.association());
-						}
-						break;
-				}
-			}
-			return extendeds;
-		}
-	}
-	
-	private Set<AssociationClosure> m_pendingFullClosers = Sets.newHashSet();
-	private List<AssociationClosure> handleTrackDeleted(String areaId, TrackletDeleted deleted) {
-		final AssociationCollection<AssociationClosure> collection
-			= m_cache.computeIfAbsent(areaId, k -> new AssociationCollection<>(KEEP_BEST_ASSOCIATION_ONLY));
-		
-		final Set<TrackletId> closedTracklets = m_associator.get().getClosedTracklets();
+	private List<AssociationClosure> handleTrackDeleted(TrackletDeleted deleted) {
+		final Set<TrackletId> closedTracklets = m_closedTracklets.keySet();
 		
 		// 주어진 tracklet의 delete로 인해 해당 tracklet과 연관된 association들 중에서
 		// fully closed된 association만 뽑는다.
 		List<AssociationClosure> fullyCloseds
-				= Funcs.filter(collection, cl -> closedTracklets.containsAll(cl.getTracklets()));
+				= Funcs.filter(m_session.m_collection, cl -> closedTracklets.containsAll(cl.getTracklets()));
 		// 뽑은 association들 중 일부는 서로 conflict한 것들이 있을 수 있기 때문에
 		// 이들 중에서 점수를 기준으로 conflict association들을 제거한 best association 집합을 구한다.
 		fullyCloseds = AssociationCollection.selectBestAssociations(fullyCloseds);
@@ -168,7 +91,7 @@ public class AssociationClosureBuilder
 			
 			// close된 closure보다 더 superior한 closure가 있는지 확인하여
 			// 없는 경우에만 관련 closure 삭제를 수행한다.
-			AssociationClosure superior = collection.findSuperiorFirst(closed);
+			AssociationClosure superior = m_session.m_collection.findSuperiorFirst(closed);
 			if ( superior != null ) {
 				if ( s_logger.isDebugEnabled() ) {
 					s_logger.debug("found a superior: this={} superior={}", closed, superior);
@@ -181,7 +104,7 @@ public class AssociationClosureBuilder
 				m_pendingFullClosers.add(closed);
 			}
 			else {
-				graduate(collection, closed);
+				graduate(m_session.m_collection, closed);
 				graduated.add(closed);
 			}
 		}
@@ -190,8 +113,8 @@ public class AssociationClosureBuilder
 		// closure에 의해 삭제되었을 수도 있기 때문에, 삭제 여부를 확인한다.
 		if ( graduated.size() > 0 && m_pendingFullClosers.size() > 0) {
 			Funcs.removeIf(m_pendingFullClosers, fc -> {
-				if ( collection.findSuperiorFirst(fc) == null ) {
-					graduate(collection, fc);
+				if ( m_session.m_collection.findSuperiorFirst(fc) == null ) {
+					graduate(m_session.m_collection, fc);
 					graduated.add(fc);
 					return true;
 				}
@@ -203,7 +126,7 @@ public class AssociationClosureBuilder
 		
 		return graduated;
 	}
-	
+		
 	private void graduate(AssociationCollection<AssociationClosure> collection, AssociationClosure closure) {
 		// 졸업할 closure보다 inferior한 모든 closure들을 제거한다.
 		List<AssociationClosure> removeds = collection.removeInferiors(closure);
@@ -223,5 +146,34 @@ public class AssociationClosureBuilder
 		m_pendingFullClosers.remove(closure);
 		
 		collection.remove(closure.getTracklets());
+	}
+	
+	private void purgeClosedBinaryAssociation(Set<TrackletId> trkIds) {
+		// 주어진 tracklet이 포함된 모든 binary association을 제거한다.
+		List<BinaryAssociation> purgeds = Funcs.removeIf(m_session.getBinaryAssociationCollection(),
+														ba -> Funcs.intersects(ba.getTracklets(), trkIds));
+		if ( s_logger.isDebugEnabled() ) {
+			purgeds.forEach(ba -> s_logger.debug("delete binary-association: {}", ba));
+		}
+		trkIds.forEach(m_session.getBinaryAssociationStore()::removeRecord);
+		
+		trkIds.forEach(m_closedTracklets::remove);
+		if ( s_logger.isDebugEnabled() ) {
+			trkIds.forEach(trkId -> s_logger.debug("delete tracklet: {}", trkId));
+		}
+	}
+		
+	private List<TrackletDeleted> removeDanglingClosedTracklets() {
+		// close된 tracklet들 중에서 binary association이 없는 경우
+		// 해당 tracklet은 다른 tracklet과 association 없이 종료된 것으로
+		// 단일 association으로 구성된 closure를 생성한다.
+		List<utils.func.KeyValue<TrackletId,TrackletDeleted>> danglings
+				= Funcs.removeIf(m_closedTracklets,
+								(tid, ev) -> !Funcs.exists(m_session.m_collection, ba -> ba.containsTracklet(tid)));
+		if ( s_logger.isDebugEnabled() && danglings.size() > 0 ) {
+			danglings.forEach(trkId -> s_logger.debug("delete dangling tracklet: {}", trkId));
+		}
+		
+		return Funcs.map(danglings, kv -> kv.value());
 	}
 }

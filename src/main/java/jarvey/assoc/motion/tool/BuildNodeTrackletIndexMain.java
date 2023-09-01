@@ -1,18 +1,21 @@
-package jarvey.assoc.motion;
+package jarvey.assoc.motion.tool;
+
+import org.apache.kafka.streams.Topology.AutoOffsetReset;
+
+import jarvey.streams.node.NodeTrackletIndexCreator;
 
 import picocli.CommandLine;
 import picocli.CommandLine.Help.Ansi;
 
 
 /**
- * 
+ *
  * @author Kang-Woo Lee (ETRI)
  */
-
-public class MotionBasedAssociatorMain {
+public class BuildNodeTrackletIndexMain {
 	@SuppressWarnings("deprecation")
 	public static final void main(String... args) throws Exception {
-		MotionBasedAssociatorTopologyBuilder cmd = new MotionBasedAssociatorTopologyBuilder();
+		NodeTrackletIndexCreator cmd = new NodeTrackletIndexCreator();
 		CommandLine commandLine = new CommandLine(cmd).setUsageHelpWidth(100);
 		try {
 			commandLine.parse(args);
@@ -21,6 +24,10 @@ public class MotionBasedAssociatorMain {
 				commandLine.usage(System.out, Ansi.OFF);
 			}
 			else {
+				cmd.setApplicationId("node-tracklet-indexer")
+					.setInputTopic("node-tracks-repartition")
+					.setAutoOffsetReset(AutoOffsetReset.EARLIEST);
+				
 				cmd.run();
 			}
 		}

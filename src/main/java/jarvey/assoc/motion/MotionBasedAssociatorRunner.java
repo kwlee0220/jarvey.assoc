@@ -13,7 +13,6 @@ import org.apache.kafka.streams.Topology.AutoOffsetReset;
 import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.Named;
-import org.apache.kafka.streams.kstream.Predicate;
 import org.apache.kafka.streams.kstream.Produced;
 import org.apache.kafka.streams.state.Stores;
 import org.slf4j.Logger;
@@ -23,19 +22,24 @@ import utils.UnitUtils;
 import utils.UsageHelp;
 import utils.func.Either;
 
-import jarvey.assoc.AssociationClosure;
-import jarvey.assoc.BinaryAssociation;
 import jarvey.assoc.OverlapArea;
 import jarvey.assoc.OverlapAreaRegistry;
+import jarvey.assoc.motion.Processors.AssociationExtenderManager;
+import jarvey.assoc.motion.Processors.ContextSetter;
+import jarvey.assoc.motion.Processors.FixedAssociationSelectorManager;
+import jarvey.streams.KafkaAdmins;
 import jarvey.streams.KafkaParameters;
-import jarvey.streams.MockKeyValueStore;
 import jarvey.streams.TrackTimestampExtractor;
-import jarvey.streams.model.GlobalTrack;
-import jarvey.streams.model.TrackletId;
+import jarvey.streams.model.AssociationClosure;
+import jarvey.streams.model.BinaryAssociation;
+import jarvey.streams.model.JarveySerdes;
+import jarvey.streams.model.TrackletDeleted;
 import jarvey.streams.node.NodeTrack;
 import jarvey.streams.serialization.json.GsonUtils;
 
+import picocli.CommandLine;
 import picocli.CommandLine.Command;
+import picocli.CommandLine.Help.Ansi;
 import picocli.CommandLine.Mixin;
 import picocli.CommandLine.Model.CommandSpec;
 import picocli.CommandLine.Option;
@@ -49,8 +53,8 @@ import picocli.CommandLine.Spec;
 			parameterListHeading = "Parameters:%n",
 			optionListHeading = "Options:%n",
 			description="Motion-based NodeTrack association")
-final class MotionBasedAssociatorTopologyBuilder implements Runnable {
-	private static final Logger s_logger = LoggerFactory.getLogger(MotionBasedAssociatorMain.class);
+final class MotionBasedAssociatorRunner implements Runnable {
+	private static final Logger s_logger = LoggerFactory.getLogger(MotionBasedAssociatorRunner.class);
 
 	private static final String APPLICATION_ID = "motion-associator";
 	private static final String TOPIC_NODE_TRACKS = "node-tracks-repartition";
@@ -99,9 +103,9 @@ final class MotionBasedAssociatorTopologyBuilder implements Runnable {
 	private boolean m_useMockStateStore = false;
 	
 	private OverlapAreaRegistry m_areaRegistry;
-	private final MotionBasedAssociatorContext m_mbaContext = new MotionBasedAssociatorContext();
+	private MotionBasedAssociationContext m_context = new MotionBasedAssociationContext();
 	
-	public MotionBasedAssociatorTopologyBuilder setAutoOffsetReset(AutoOffsetReset reset) {
+	public MotionBasedAssociatorRunner setAutoOffsetReset(AutoOffsetReset reset) {
 		m_kafkaParams.setAutoOffsetReset(reset.toString());
 		return this;
 	}
@@ -125,6 +129,12 @@ final class MotionBasedAssociatorTopologyBuilder implements Runnable {
 			Properties props = m_kafkaParams.toStreamProperties();
 			KafkaStreams streams = new KafkaStreams(topology, props);
 			Runtime.getRuntime().addShutdownHook(new Thread(streams::close));
+
+			try {
+				KafkaAdmins admin = new KafkaAdmins(m_kafkaParams.getBootstrapServers());
+				admin.deleteConsumerGroup(m_kafkaParams.getApplicationId());
+			}
+			catch ( Exception ignored ) { }
 			
 			streams.start();
 		}
@@ -133,23 +143,15 @@ final class MotionBasedAssociatorTopologyBuilder implements Runnable {
 		}
 	}
 	
-	@SuppressWarnings("deprecation")
+	@SuppressWarnings({ "deprecation", "unchecked" })
 	private Topology build() {
 		StreamsBuilder builder = new StreamsBuilder();
 		
-		String[] binaryAssocStoreNames;
-		if ( m_useMockStateStore ) {
-			MockKeyValueStore<TrackletId,BinaryAssociationStore.Record> kvStore
-						= new MockKeyValueStore<>(STORE_BINARY_ASSOCIATIONS,
-													GsonUtils.getSerde(TrackletId.class),
-													GsonUtils.getSerde(BinaryAssociationStore.Record.class));
-			m_mbaContext.addMockKeyValueStore(STORE_BINARY_ASSOCIATIONS, kvStore);
-			binaryAssocStoreNames = new String[]{};
-		}
-		else {
+		String[] binaryAssocStoreNames = new String[]{};
+		if ( !m_useMockStateStore ) {
 			builder.addStateStore(Stores.keyValueStoreBuilder(
 												Stores.persistentKeyValueStore(STORE_BINARY_ASSOCIATIONS),
-												GsonUtils.getSerde(TrackletId.class),
+												JarveySerdes.TrackletId(),
 												GsonUtils.getListSerde(BinaryAssociation.class)));
 			binaryAssocStoreNames = new String[]{STORE_BINARY_ASSOCIATIONS};
 		}
@@ -157,41 +159,46 @@ final class MotionBasedAssociatorTopologyBuilder implements Runnable {
 		KStream<String,NodeTrack> validNodeTracks =
 			builder
 				.stream(m_inputTopic,
-						Consumed.with(Serdes.String(), GsonUtils.getSerde(NodeTrack.class))
+						Consumed.with(Serdes.String(), JarveySerdes.NodeTrack())
 								.withName("from-node-tracks")
 								.withTimestampExtractor(TS_EXTRACTOR)
 								.withOffsetResetPolicy(m_kafkaParams.getAutoOffsetReset()))
 				.filter(this::withAreaDistance, Named.as("filter-valid-node-tracks"));
 		
-		validNodeTracks
-			.flatTransform(this::createBinaryAssociator,
-									Named.as("binary-association"), binaryAssocStoreNames)
-			.flatTransformValues(this::createClosureBuilder, Named.as("closure-builder"))
+		KStream<String,Either<BinaryAssociation, TrackletDeleted>>[] branches
+			= validNodeTracks
+				.flatMap(createBinaryAssociator(), Named.as("binary-association"))
+				.flatTransformValues(this::createContextSetter, binaryAssocStoreNames)
+				.branch(this::isBinaryAssociation, this::isTrackletDeleted);
+		
+		branches[0]
+			.mapValues(either -> either.getLeft())
+			.flatMapValues(new AssociationExtenderManager(m_context), Named.as("closure-builder"));
+//			.print(Printed.toSysOut());
+			
+		branches[1]
+			.mapValues(either -> either.getRight())
+			.flatMapValues(new FixedAssociationSelectorManager(m_context), Named.as("final-association"))
 			.mapValues(AssociationClosure::toDao)
 			.to(m_outputAssocTopic,
-				Produced.with(Serdes.String(), GsonUtils.getSerde(AssociationClosure.DAO.class))
+				Produced.with(Serdes.String(), JarveySerdes.AssociationClosure())
 						.withName("to-motion-associations"));
 		
 		validNodeTracks
-			.flatMapValues(new GlobalTrackGenerator(m_mbaContext), Named.as("generate-global-tracks"))
+			.flatMapValues(new GlobalTrackGenerator(m_context), Named.as("generate-global-tracks"))
 			.to(m_outputTrackTopic,
-				Produced.with(Serdes.String(), GsonUtils.getSerde(GlobalTrack.class))
+				Produced.with(Serdes.String(), JarveySerdes.GlobalTrack())
 						.withName("to-global-tracks"));
 		
 		return builder.build();
 	}
 	
-	private BinaryTrackAssociator createBinaryAssociator() {
-		BinaryTrackAssociator ba = new BinaryTrackAssociator(m_assocInterval, m_maxTrackDistance,
-														STORE_BINARY_ASSOCIATIONS, m_useMockStateStore);
-		m_mbaContext.setBinaryTrackAssociator(ba);
-		return ba;
+	private BinaryTrackletAssociator createBinaryAssociator() {
+		return new BinaryTrackletAssociator(m_assocInterval, m_maxTrackDistance);
 	}
 	
-	private AssociationClosureBuilder createClosureBuilder() {
-		AssociationClosureBuilder builder = new AssociationClosureBuilder(m_mbaContext);
-		m_mbaContext.setAssociationClosureBuilder(builder);
-		return builder;
+	private ContextSetter createContextSetter() {
+		return new ContextSetter(m_context, STORE_BINARY_ASSOCIATIONS, m_useMockStateStore);
 	}
 	
 	private boolean withAreaDistance(String areaId, NodeTrack track) {
@@ -208,19 +215,30 @@ final class MotionBasedAssociatorTopologyBuilder implements Runnable {
 		return track.getDistance() <= threshold;
 	}
 	
-	private static Predicate<String,Either<AssociationClosure,GlobalTrack>> s_toAssociationBranch
-		= new Predicate<String,Either<AssociationClosure,GlobalTrack>>() {
-			@Override
-			public boolean test(String areaId, Either<AssociationClosure, GlobalTrack> either) {
-				return either.isLeft();
-			}
-		};
+	private boolean isBinaryAssociation(String nodeId, Either<BinaryAssociation, TrackletDeleted> either) {
+		return either.isLeft();
+	}
+	private boolean isTrackletDeleted(String nodeId, Either<BinaryAssociation, TrackletDeleted> either) {
+		return either.isRight();
+	}
 	
-	private static Predicate<String,Either<AssociationClosure,GlobalTrack>> s_toGlobalTrackBranch
-		= new Predicate<String,Either<AssociationClosure,GlobalTrack>>() {
-			@Override
-			public boolean test(String areaId, Either<AssociationClosure, GlobalTrack> either) {
-				return either.isRight();
+	@SuppressWarnings("deprecation")
+	public static final void main(String... args) throws Exception {
+		MotionBasedAssociatorRunner cmd = new MotionBasedAssociatorRunner();
+		CommandLine commandLine = new CommandLine(cmd).setUsageHelpWidth(100);
+		try {
+			commandLine.parse(args);
+			
+			if ( commandLine.isUsageHelpRequested() ) {
+				commandLine.usage(System.out, Ansi.OFF);
 			}
-		};
+			else {
+				cmd.run();
+			}
+		}
+		catch ( Throwable e ) {
+			System.err.println(e);
+			commandLine.usage(System.out, Ansi.OFF);
+		}
+	}
 }

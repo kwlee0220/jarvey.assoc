@@ -1,4 +1,4 @@
-package jarvey.assoc.motion;
+package jarvey.assoc;
 
 import java.util.List;
 import java.util.Set;
@@ -21,8 +21,8 @@ import utils.func.Funcs;
 import utils.func.Tuple;
 import utils.stream.FStream;
 
-import jarvey.assoc.BinaryAssociation;
 import jarvey.streams.MockKeyValueStore;
+import jarvey.streams.model.BinaryAssociation;
 import jarvey.streams.model.TrackletId;
 import jarvey.streams.serialization.json.GsonUtils;
 
@@ -30,7 +30,7 @@ import jarvey.streams.serialization.json.GsonUtils;
  * 
  * @author Kang-Woo Lee (ETRI)
  */
-class BinaryAssociationStore {
+public class BinaryAssociationStore {
 	private static final Logger s_logger = LoggerFactory.getLogger(BinaryAssociationStore.class);
 	
 	private final KeyValueStore<TrackletId,Record> m_store;
@@ -114,10 +114,6 @@ class BinaryAssociationStore {
 							})
 							.toList();
 		m_store.putAll(storeUpdates);
-		
-//		for ( TrackletId tid: assocListMap.keySet() ) {
-//			System.out.println(tid + ": " + m_store.get(tid));
-//		}
 	}
 	
 	public Record removeRecord(TrackletId trkId) {
@@ -170,10 +166,6 @@ class BinaryAssociationStore {
 		record.isClosed = true;
 		m_store.put(trkId, record);
 	}
-	
-	
-
-	
 	
 	public final class Record {
 		@SerializedName("is_closed") public boolean isClosed;

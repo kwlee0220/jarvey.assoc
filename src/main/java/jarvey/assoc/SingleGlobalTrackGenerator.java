@@ -58,7 +58,7 @@ public class SingleGlobalTrackGenerator implements KafkaConsumerRecordProcessor<
 		
 		OverlapArea area = m_areaRegistry.findByNodeId(track.getNodeId()).getOrNull();
 		if ( area == null ) {
-			GlobalTrack gtrack = new GlobalTrack(LocalTrack.from(track));
+			GlobalTrack gtrack = GlobalTrack.from(LocalTrack.from(track), null);
 			
 			byte[] bytes = m_serializer.serialize(record.key(), gtrack);
 			m_producer.send(new ProducerRecord<>(m_outputTopic, record.key(), bytes));

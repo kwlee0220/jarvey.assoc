@@ -1,4 +1,4 @@
-package jarvey.assoc.motion;
+package jarvey.assoc;
 
 import static utils.Utilities.checkState;
 
@@ -16,8 +16,8 @@ import utils.func.Funcs;
 import utils.func.Tuple;
 import utils.stream.FStream;
 
-import jarvey.assoc.Association;
-import jarvey.assoc.AssociationClosure;
+import jarvey.streams.model.Association;
+import jarvey.streams.model.AssociationClosure;
 import jarvey.streams.model.TrackletId;
 
 
@@ -36,9 +36,13 @@ public class AssociationCollection<T extends Association> implements Iterable<T>
 		m_keepBestAssociationOly = keepBestAssociationOnly;
 	}
 	
-	AssociationCollection(List<T> associations, boolean keepBestAssociationOnly) {
+	public AssociationCollection(List<T> associations, boolean keepBestAssociationOnly) {
 		m_associations = associations;
 		m_keepBestAssociationOly = keepBestAssociationOnly;
+	}
+	
+	public boolean getKeepBestAssociationOnly() {
+		return m_keepBestAssociationOly;
 	}
 	
 	/**

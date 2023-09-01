@@ -48,8 +48,8 @@ sourceSets {
 			srcDirs 'src/main/proto'
 			srcDirs 'build/generated/source/proto/main/grpc'
 			srcDirs 'build/generated/source/proto/main/java'
-			srcDirs 'build/generated/source/proto/test/grpc'
-			srcDirs 'build/generated/source/proto/test/java'
+//			srcDirs 'build/generated/source/proto/test/grpc'
+//			srcDirs 'build/generated/source/proto/test/java'
 		}
 	}
 }

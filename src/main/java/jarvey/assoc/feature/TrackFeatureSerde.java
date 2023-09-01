@@ -1,4 +1,4 @@
-package jarvey.assoc_feature;
+package jarvey.assoc.feature;
 
 import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.serialization.Serde;

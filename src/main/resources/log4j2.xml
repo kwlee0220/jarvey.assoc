@@ -7,7 +7,8 @@
 	</Appenders>
 	<Loggers>
 		<Logger name="org.apache.kafka" level="warn"/>
-		<Logger name="jarvey.assoc.motion" level="info"/>
+		<Logger name="jarvey.assoc.feature.FeatureBasedAssociator" level="info"/>
+		<Logger name="jarvey.streams.updatelog" level="info"/>
 		
 		<Root level="info">
 			<AppenderRef ref="STDOUT"/>

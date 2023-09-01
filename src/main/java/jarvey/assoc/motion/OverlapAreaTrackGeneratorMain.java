@@ -112,6 +112,7 @@ public class OverlapAreaTrackGeneratorMain extends AbstractKafkaTopicProcessorDr
 		return KafkaTopicPartitionProcessor.wrap(gen);
 	}
 	
+	@SuppressWarnings("deprecation")
 	public static final void main(String... args) throws Exception {
 		OverlapAreaTrackGeneratorMain cmd = new OverlapAreaTrackGeneratorMain();
 		CommandLine commandLine = new CommandLine(cmd).setUsageHelpWidth(100);

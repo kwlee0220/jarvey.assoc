@@ -10,7 +10,6 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.serialization.Serializer;
-import org.locationtech.jts.geom.Point;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -18,19 +17,17 @@ import com.google.common.collect.MinMaxPriorityQueue;
 
 import utils.func.FOption;
 import utils.func.Funcs;
-import utils.func.KeyValue;
-import utils.geo.util.GeoUtils;
 import utils.stream.FStream;
 
-import jarvey.assoc.AssociationClosure;
-import jarvey.assoc.AssociationClosure.DAO;
 import jarvey.assoc.OverlapArea;
 import jarvey.assoc.OverlapAreaRegistry;
 import jarvey.streams.EventCollectingWindowAggregation;
 import jarvey.streams.HoppingWindowManager;
+import jarvey.streams.model.AssociationClosure;
 import jarvey.streams.model.GlobalTrack;
 import jarvey.streams.model.LocalTrack;
 import jarvey.streams.model.TrackletId;
+import jarvey.streams.model.AssociationClosure.DAO;
 import jarvey.streams.node.NodeTrack;
 import jarvey.streams.processor.KafkaConsumerRecordProcessor;
 import jarvey.streams.serialization.json.GsonUtils;
@@ -85,7 +82,6 @@ public class OverlapAreaTrackGenerator implements KafkaConsumerRecordProcessor<S
 		DAO assoc = m_assocDeserializer.deserialize(record.topic(), record.value());
 		
 		List<String> trackKeys = Funcs.map(assoc.getTrackletIds(), TrackletId::toString);
-		TrackletId outputTrkId = new TrackletId(record.key(), ""+assoc.getTimestamp());
 
 		HoppingWindowManager winMgr = HoppingWindowManager.ofWindowSize(Duration.ofMillis(100));
 		EventCollectingWindowAggregation<NodeTrack> aggr = new EventCollectingWindowAggregation<>(winMgr);
@@ -94,10 +90,12 @@ public class OverlapAreaTrackGenerator implements KafkaConsumerRecordProcessor<S
 		List<GlobalTrack> gtracks
 			= m_trackUpdateLogs.streamOfKeys(trackKeys)
 								// 검출 카메라로부터 일정 거리 밖에 있는 track들은 제외시킨다.
-								.filter(kv -> isWithinDistance(kv.key(), kv.value()))
-								.map(KeyValue::value)
+								.filter(kv -> isWithinDistance(kv.key, kv.value))
+								.map(kv -> kv.value)
+								// 검색되는 모든 node-track들을 일정 구간 단위로 나누어서 grouping한다.
 								.flatMapIterable(aggr::collect)
-								.map(w -> merge(outputTrkId, w.value()))
+								// association을 활용하여 구간별로 global track을 생성함. 
+								.map(w -> buildGlobalTrack(record.key(), assoc, w.value()))
 								.toList();
 		gtracks.forEach(m_heap::add);
 		publishUpto(assoc.getTimestamp() - LAG_MILLIS);
@@ -130,25 +128,23 @@ public class OverlapAreaTrackGenerator implements KafkaConsumerRecordProcessor<S
 	
 	private void publish(GlobalTrack gtrack) {
 		byte[] bytes = m_serializer.serialize(m_outputTopic, gtrack);
-		m_producer.send(new ProducerRecord<>(m_outputTopic, gtrack.getNodeId(), bytes));
+		m_producer.send(new ProducerRecord<>(m_outputTopic, gtrack.getOverlapArea(), bytes));
 	}
 	
-	private GlobalTrack merge(TrackletId outputTrkId, List<NodeTrack> tracks) {
-		List<Point> pts = FStream.from(tracks)
-								.filterNot(NodeTrack::isDeleted)
-								.map(NodeTrack::getLocation)
-								.toList();
-		if ( pts.isEmpty() ) {
-			return GlobalTrack.deleted(LocalTrack.from(tracks.get(0)), outputTrkId.getNodeId());
-		}
-		Point loc = GeoUtils.average(pts);
-		List<LocalTrack> ltracks = FStream.from(tracks)
+	private GlobalTrack buildGlobalTrack(String areaId, AssociationClosure.DAO assoc, List<NodeTrack> tracks) {
+		// supporting node-track들을 구한다.
+		// supporting track에는 delete된 track들을 제외시킨다.
+		List<LocalTrack> supports = FStream.from(tracks)
 											.filterNot(NodeTrack::isDeleted)
 											.map(LocalTrack::from)
 											.toList();
-		long ts = FStream.from(tracks).map(NodeTrack::getTimestamp).max();
+		// 만일 구성 node-track이 모두 delete된 상태라면 delete된 global track으로 간주한다. 
+		if ( supports.isEmpty() ) {
+			LocalTrack leader = FStream.from(tracks).map(LocalTrack::from).min(LocalTrack::getFirstTimestamp);
+			return GlobalTrack.deleted(leader, areaId);
+		}
 		
-		return new GlobalTrack(outputTrkId, outputTrkId.getNodeId(), loc, ltracks, ts);
+		return GlobalTrack.from(assoc, supports, areaId);
 	}
 	
 	private boolean isWithinDistance(String areaId, NodeTrack track) {

@@ -102,6 +102,7 @@ public class RepartitionNodeTrackMain extends AbstractKafkaTopicProcessorDriver<
 		super.run();
 	}
 	
+	@SuppressWarnings("deprecation")
 	public static final void main(String... args) throws Exception {
 		RepartitionNodeTrackMain cmd = new RepartitionNodeTrackMain();
 		

@@ -45,6 +45,7 @@ public class OverlapAreaRegistry {
 		
 		Map<String, Object> areas = new Yaml().load(new FileReader("overlap_areas.yaml"));
 		for ( Map.Entry<String, Object> ent: areas.entrySet() ) {
+			@SuppressWarnings("unchecked")
 			OverlapArea area = OverlapArea.parse((Map<String, Object>)ent.getValue());
 			registry.add(area.getId(), area);
 		}

@@ -3,9 +3,9 @@ package jarvey.assoc.motion.tool;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.streams.Topology.AutoOffsetReset;
 
-import jarvey.assoc_feature.TrackFeatureSerde;
+import jarvey.assoc.feature.TrackFeatureSerde;
 import jarvey.streams.node.TrackFeature;
-import jarvey.streams.updatelog.KeyedUpdateLogIndexBuilder;
+import jarvey.streams.updatelog.KeyedUpdateLogIndexerBuilder;
 
 import picocli.CommandLine;
 import picocli.CommandLine.Help.Ansi;
@@ -18,7 +18,7 @@ import picocli.CommandLine.Help.Ansi;
 public class BuildTrackFeatureIndexMain {
 	@SuppressWarnings("deprecation")
 	public static final void main(String... args) throws Exception {
-		KeyedUpdateLogIndexBuilder<TrackFeature> cmd = new KeyedUpdateLogIndexBuilder<>();
+		KeyedUpdateLogIndexerBuilder<TrackFeature> cmd = new KeyedUpdateLogIndexerBuilder<>();
 		CommandLine commandLine = new CommandLine(cmd).setUsageHelpWidth(100);
 		try {
 			commandLine.parse(args);
@@ -31,7 +31,6 @@ public class BuildTrackFeatureIndexMain {
 				
 				cmd.setApplicationId("track-features-indexer")
 					.setInputTopic("track-features")
-					.setUpdateDelimitTopic("track-features-delimit")
 					.setIndexTableName("track_features_index")
 					.useKeyedUpdateSerde(serde)
 					.setAutoOffsetReset(AutoOffsetReset.EARLIEST);
