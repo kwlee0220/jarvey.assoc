@@ -9,7 +9,6 @@ import org.yaml.snakeyaml.Yaml;
 
 import com.google.common.collect.Maps;
 
-import utils.func.FOption;
 import utils.stream.FStream;
 
 /**
@@ -27,8 +26,10 @@ public class OverlapAreaRegistry {
 		return m_areas.put(id, area);
 	}
 	
-	public FOption<OverlapArea> findByNodeId(String nodeId) {
-		return FStream.from(m_areas.values()).findFirst(area -> area.containsNode(nodeId));
+	public OverlapArea findByNodeId(String nodeId) {
+		return FStream.from(m_areas.values())
+						.findFirst(area -> area.containsNode(nodeId))
+						.getOrNull();
 	}
 	
 	public boolean containsNode(String nodeId) {

@@ -3,7 +3,7 @@ package jarvey.assoc.motion.tool;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.streams.Topology.AutoOffsetReset;
 
-import jarvey.assoc.feature.TrackFeatureSerde;
+import jarvey.streams.model.TrackFeatureSerde;
 import jarvey.streams.node.TrackFeature;
 import jarvey.streams.updatelog.KeyedUpdateLogIndexerBuilder;
 

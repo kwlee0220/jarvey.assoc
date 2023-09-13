@@ -1,22 +1,21 @@
 package jarvey.assoc;
 
-import static utils.Utilities.checkState;
-
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 
 import utils.Indexed;
 import utils.func.Funcs;
 import utils.func.Tuple;
 import utils.stream.FStream;
 
-import jarvey.streams.model.Association;
+import jarvey.streams.model.Association.BinaryRelation;
 import jarvey.streams.model.AssociationClosure;
 import jarvey.streams.model.TrackletId;
 
@@ -25,24 +24,17 @@ import jarvey.streams.model.TrackletId;
  * 
  * @author Kang-Woo Lee (ETRI)
  */
-public class AssociationCollection<T extends Association> implements Iterable<T>  {
-	private static final Logger s_logger = LoggerFactory.getLogger(AssociationCollection.class);
+public class AssociationCollection implements Iterable<AssociationClosure>  {
+	private final String m_id;
+	private final List<AssociationClosure> m_associations;
 	
-	private final boolean m_keepBestAssociationOly;
-	private final List<T> m_associations;
-	
-	public AssociationCollection(boolean keepBestAssociationOnly) {
+	public AssociationCollection(String id) {
+		m_id = id;
 		m_associations = Lists.newArrayList();
-		m_keepBestAssociationOly = keepBestAssociationOnly;
 	}
 	
-	public AssociationCollection(List<T> associations, boolean keepBestAssociationOnly) {
-		m_associations = associations;
-		m_keepBestAssociationOly = keepBestAssociationOnly;
-	}
-	
-	public boolean getKeepBestAssociationOnly() {
-		return m_keepBestAssociationOly;
+	public String getId() {
+		return m_id;
 	}
 	
 	/**
@@ -55,11 +47,11 @@ public class AssociationCollection<T extends Association> implements Iterable<T>
 	}
 
 	@Override
-	public Iterator<T> iterator() {
+	public Iterator<AssociationClosure> iterator() {
 		return m_associations.iterator();
 	}
 	
-	public List<T> find(TrackletId trkId) {
+	public List<AssociationClosure> find(TrackletId trkId) {
 		return Funcs.filter(m_associations, a -> a.containsTracklet(trkId));
 	}
 	
@@ -73,7 +65,7 @@ public class AssociationCollection<T extends Association> implements Iterable<T>
 	 * @param key	검색 키로 사용할 tracklet 집합.
 	 * @return	검색된 association 객체. 존재하지 않는 경우에는 null.
 	 */
-	public T get(Set<TrackletId> key) {
+	public AssociationClosure get(Set<TrackletId> key) {
 		return Funcs.findFirst(m_associations, a -> key.equals(a.getTracklets()));
 	}
 
@@ -83,7 +75,7 @@ public class AssociationCollection<T extends Association> implements Iterable<T>
 	 * @param key	검색 키로 사용할 tracklet 집합.
 	 * @return	검색된 association 및 순번 객체. 존재하지 않는 경우에는 null.
 	 */
-	public Indexed<T> getIndexed(Set<TrackletId> key) {
+	public Indexed<AssociationClosure> getIndexed(Set<TrackletId> key) {
 		return FStream.from(m_associations)
 						.zipWithIndex()
 						.findFirst(t -> key.equals(t._1.getTracklets()))
@@ -97,24 +89,20 @@ public class AssociationCollection<T extends Association> implements Iterable<T>
 	 * @param key	검색 키로 사용할 tracklet의 식별자.
 	 * @return	검색된 association의 stream 객체.
 	 */
-	public FStream<T> findAll(TrackletId key) {
+	public FStream<AssociationClosure> findAll(TrackletId key) {
 		return FStream.from(m_associations)
 						.filter(a -> a.containsTracklet(key));
 	}
 	
-	public FStream<Indexed<T>> findIndexedAll(TrackletId key) {
+	public FStream<Indexed<AssociationClosure>> findIndexedAll(TrackletId key) {
 		return FStream.from(m_associations)
 						.zipWithIndex()
 						.map(t -> Indexed.with(t._1, t._2))
 						.filter(idxed -> idxed.value().containsTracklet(key));
 	}
 	
-	public T findSuperiorFirst(AssociationClosure key) {
+	public AssociationClosure findSuperiorFirst(AssociationClosure key) {
 		return Funcs.findFirst(m_associations, cl -> cl.isSuperior(key));
-	}
-	
-	public boolean add(T assoc) {
-		return m_keepBestAssociationOly ? addDisallowConflict(assoc) : addAllowConflict(assoc);
 	}
 	
 	/**
@@ -123,123 +111,116 @@ public class AssociationCollection<T extends Association> implements Iterable<T>
 	 * @param key	tracklet id 집합
 	 * @return	제거된 association 객체. 해당 키의 association 존재하지 않은 경우는 {@code null}.
 	 */
-	public T remove(Set<TrackletId> key) {
+	public AssociationClosure remove(Set<TrackletId> key) {
 		return Funcs.removeFirstIf(m_associations, a -> a.match(key));
 	}
 	
-	public T remove(int index) {
+	public AssociationClosure remove(int index) {
 		return m_associations.remove(index);
 	}
 	
-	public List<T> removeInferiors(T key) {
+	public List<AssociationClosure> removeInferiors(AssociationClosure key) {
 		return Funcs.removeIf(m_associations, cl -> cl.isInferior(key));
 	}
 	
-	private boolean addAllowConflict(T assoc) {
+	public List<AssociationClosure> add(AssociationClosure assoc) {
+		return add(assoc, true);
+	}
+	
+	public List<AssociationClosure> add(AssociationClosure assoc, boolean expandOnConflict) {
 		// collection이 빈 경우는 바로 삽입하고 반환한다.
 		if ( size() == 0 ) {
 			m_associations.add(assoc);
-			return true;
+			return Collections.singletonList(assoc);
 		}
 		
-		// collection에 이미 추가하려는 association보다 더 specific한 association이
-		// 하나라도 이미 존재하는지 확인하여 존재하면 삽입을 취소한다.
-		if ( Funcs.exists(m_associations, a -> a.isMoreSpecific(assoc)) ) {
-			return false;
-		}
-		
-		// 동일 tracklet으로 구성된 association이 이미 존재하는 경우는
-		// score 값만 변경하고, 그렇지 않은 경우는 collection 추가한다.
-		Indexed<T> found = getIndexed(assoc.getTracklets());
-		if ( found != null ) {
-			if ( found.value().getScore() < assoc.getScore() ) {
-				m_associations.set(found.index(), assoc);
-				return true;
+		List<AssociationClosure> updateds = Lists.newArrayList();
+		Map<BinaryRelation,List<AssociationClosure>> groups = Maps.newHashMap();
+		Iterator<AssociationClosure> iter = m_associations.iterator();
+		while ( iter.hasNext() ) {
+			AssociationClosure current = iter.next();
+
+			BinaryRelation rel = current.relate(assoc);
+			if ( rel == BinaryRelation.SAME ) {
+				if ( current.getScore() >= assoc.getScore() ) {
+					return Collections.emptyList();
+				}
+				else {
+					iter.remove();
+					m_associations.add(assoc);
+					
+					return Collections.singletonList(assoc);
+				}
 			}
 			else {
-				return false;
+				groups.computeIfAbsent(rel, k -> Lists.newArrayList()).add(current);
 			}
 		}
-		else {
-			// Collection에 포함된 less-speicific한 association들은 모두 제거한다.
-			m_associations.removeIf(assoc::isMoreSpecific);	
-			m_associations.add(assoc);
-			return true;
-		}
-	}
-	
-	private boolean addDisallowConflict(T assoc) {
-		// collection이 빈 경우는 바로 삽입하고 반환한다.
-		if ( size() == 0 ) {
-			m_associations.add(assoc);
-			return true;
+		
+		List<AssociationClosure> superiors = groups.get(BinaryRelation.LEFT_SUBSUME);
+		if ( superiors != null && superiors.size() > 0 ) {
+			// 이미 더 superior한 association이 존재하는 경우
+			return Collections.emptyList();
 		}
 		
-		// 새로 삽입할 association에 포함된 tracklet들 중 일부라도 동일한 tracklet을
-		// 가진 association들을 구한다.
-		List<T> overlaps = Funcs.filter(m_associations, assoc::intersectsTracklet);
-        if ( overlaps.isEmpty() ) {
-            // 충돌하는 association이 없는 경우는 새 association을 삽입한다.
-            boolean done = addAllowConflict(assoc);
-            checkState(done);
-            
-            return true;
-        }
-        
-        //
-        // 겹치는 association (overlaps) 들이 존재하는 경우
-        //
-        
-        // 삽입될 assoc보다 더 superior한 association이 이미 존재하면 삽입을 취소한다.
-        // (즉, superior한 association 이미 존재하면 취소함.)
-        Association superior = Funcs.findFirst(overlaps, c -> c.isSuperior(assoc));
-        if ( superior != null ) {
-        	if ( s_logger.isDebugEnabled() ) {
-        		s_logger.debug("reject adding association: assoc={}, superior={}", assoc, superior);
-        	}
-        	return false;
-        }
-      
-		//
-		// 현재 상태는 새로 삽입될 association이 overlap된 기존 association들보다
-        // superior하다고 볼 수 있다.
-        //
-        
-        // overlap에 포함된 association들을 'm_associations'에서 일단 제거한다.
-        // (이후에 conflict를 유발하는 binary association만 제거 후 다시 추가시킨다.)
-        Funcs.removeIf(m_associations, a -> Funcs.exists(overlaps, ov -> ov.match(a.getTracklets())));
-        
-        boolean done = m_associations.add(assoc);
-        checkState(done);
-        
-        // 새 association과 conflict를 유발하는 association들에서 새로 삽입된 association과
-        // 겹치는 부분을 제외한 association이 존재하는 경우 이것을 다시 삽입시킨다.
-        List<T> conflicts = Funcs.filter(overlaps, assoc::isConflict);
-        for ( T conflict: conflicts ) {
-        	// conlict와 assoc과 공유하는 tracklet을 모두 제거한 뒤,
-        	// 남은 association이 존재한다면 이를 삽입한다.
-        	Set<TrackletId> commonTrkIds = conflict.intersectionTracklet(assoc);
-        	T shrinked = removeTracklets(conflict, commonTrkIds);
-    		if ( shrinked != null && shrinked.size() >= 2 ) {
-    			addAllowConflict(conflict);
-    		}
-        }
-        
-        return true;
+		List<AssociationClosure> inferiors = groups.get(BinaryRelation.RIGHT_SUBSUME);
+		if ( inferiors != null && inferiors.size() > 0 ) {
+			// 기존 inferior한 association들을 모두 제거한다.
+			Set<AssociationClosure> infSet = Sets.newHashSet(inferiors);
+			Funcs.removeIf(m_associations, cl -> infSet.contains(cl));
+		}
+		
+		boolean expanded = false;
+		
+		List<AssociationClosure> mergeables = groups.get(BinaryRelation.MERGEABLE);
+		if ( mergeables != null && mergeables.size() > 0 ) {
+			List<AssociationClosure> result = FStream.from(mergeables)
+														.map(m -> m.merge(assoc))
+														.flatMapIterable(m -> add(m, true))
+														.toList();
+			if ( result.size() > 0 ) {
+				updateds.addAll(result);
+				expanded = true;
+			}
+		}
+
+		if ( groups.containsKey(BinaryRelation.CONFLICT) ) {
+			if ( expandOnConflict ) {
+				List<AssociationClosure> conflicts = groups.get(BinaryRelation.CONFLICT);
+				for ( AssociationClosure conflict: conflicts ) {
+					AssociationClosure merged = assoc.mergeWithoutConflicts(conflict, true);
+					if ( merged != null ) {
+						updateds.addAll(add(merged, false));
+						expanded = true;
+					}
+				}
+			}
+		}
+		if ( !expanded ) {
+			m_associations.add(assoc);
+			updateds.add(assoc);
+		}
+		
+		return updateds;
 	}
 	
-	public List<T> getBestAssociations() {
+	public List<AssociationClosure> getBestAssociations() {
 		return selectBestAssociations(m_associations);
 	}
 	
-	public static <T extends Association> List<T> selectBestAssociations(List<T> assocList) {
-		List<T> bestAssocList = Lists.newArrayList();
-		List<T> sorted = FStream.from(assocList)
-								.sort(a -> Tuple.of(a.size(), a.getScore()))
-								.toList();
-		sorted = Lists.reverse(sorted);
+	public static List<AssociationClosure> selectBestAssociations(List<AssociationClosure> assocList) {
+		List<AssociationClosure> bestAssocList = Lists.newArrayList();
+		
+		// collection에 속한 모든 association들을 길이와 score 값을 기준을 정렬시킨다.
+		List<AssociationClosure> sorted = FStream.from(assocList)
+												.sort(a -> Tuple.of(a.size(), a.getScore()), true)
+												.toList();
+		
+		// 정렬된 association들을 차례대로 읽어 동일한 tracklet으로 구성된 inferior association들을
+		// 삭제하는 방법으로 best association들을 구한다.
+//		sorted = Lists.reverse(sorted);
 		while ( sorted.size() > 0 ) {
-			T best = sorted.remove(0);
+			AssociationClosure best = sorted.remove(0);
 			bestAssocList.add(best);
 			Funcs.removeIf(sorted, best::intersectsTracklet);
 		}
@@ -254,17 +235,5 @@ public class AssociationCollection<T extends Association> implements Iterable<T>
 	@Override
 	public String toString() {
 		return m_associations.toString();
-	}
-	
-	@SuppressWarnings("unchecked")
-	private T removeTracklets(T assoc, Iterable<TrackletId> trkIds) {
-		T shrinked = assoc;
-    	for ( TrackletId trkId: trkIds ) {
-    		shrinked = (T)assoc.removeTracklet(trkId);
-    		if ( shrinked == null ) {
-    			return null;
-    		}
-    	}
-    	return shrinked;
 	}
 }

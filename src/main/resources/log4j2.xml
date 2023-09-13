@@ -10,6 +10,10 @@
 		<Logger name="jarvey.assoc.feature.FeatureBasedAssociator" level="info"/>
 		<Logger name="jarvey.streams.updatelog" level="info"/>
 		
+		<Logger name="jarvey.assoc.motion.FinalMotionAssociationSelector" level="info"/>
+		<Logger name="jarvey.assoc.motion.FinalFeatureAssociationSelector" level="info"/>
+		<Logger name="jarvey.assoc.feature.FeatureBinaryTrackletAssociator" level="info"/>
+		
 		<Root level="info">
 			<AppenderRef ref="STDOUT"/>
 		</Root>

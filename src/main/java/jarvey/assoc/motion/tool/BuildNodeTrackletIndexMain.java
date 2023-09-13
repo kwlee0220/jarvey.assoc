@@ -25,7 +25,7 @@ public class BuildNodeTrackletIndexMain {
 			}
 			else {
 				cmd.setApplicationId("node-tracklet-indexer")
-					.setInputTopic("node-tracks-repartition")
+					.setInputTopic("node-tracks")
 					.setAutoOffsetReset(AutoOffsetReset.EARLIEST);
 				
 				cmd.run();

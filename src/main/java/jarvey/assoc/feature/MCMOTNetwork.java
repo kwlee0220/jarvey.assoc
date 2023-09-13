@@ -68,7 +68,7 @@ public class MCMOTNetwork {
 		zoneDesc = Maps.newHashMap();
 		zoneDesc.put("A",
 					Arrays.asList(
-//						new IncomingLink("etri:04", "A", Duration.ofSeconds(3)),
+//						new IncomingLink("etri:04", "A", Duration.ofSeconds(3))
 						new IncomingLink("etri:05", "A", Duration.ofMillis(1500))
 //						new IncomingLink("etri:06", "A", Duration.ofSeconds(2))
 					));

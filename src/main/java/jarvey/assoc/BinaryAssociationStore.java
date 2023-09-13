@@ -23,6 +23,7 @@ import utils.stream.FStream;
 
 import jarvey.streams.MockKeyValueStore;
 import jarvey.streams.model.BinaryAssociation;
+import jarvey.streams.model.BinaryAssociationCollection;
 import jarvey.streams.model.TrackletId;
 import jarvey.streams.serialization.json.GsonUtils;
 
@@ -77,7 +78,7 @@ public class BinaryAssociationStore {
 		return Funcs.asNonNull(m_store.get(trkId), Record::new);
 	}
 	
-	public AssociationCollection<BinaryAssociation> load() {
+	public BinaryAssociationCollection load() {
 		final List<BinaryAssociation> assocList = Lists.newArrayList();
 		final Set<Set<TrackletId>> pairs = Sets.newHashSet();
 		
@@ -95,14 +96,14 @@ public class BinaryAssociationStore {
 			}
 		}
 		
-		return new AssociationCollection<BinaryAssociation>(assocList, false);
+		return new BinaryAssociationCollection(assocList, true);
 	}
 	
 	public void updateAll(List<BinaryAssociation> updates) {
 		final ArrayListMultimap<TrackletId,BinaryAssociation> assocListMap = ArrayListMultimap.create();
 		updates.forEach(ba -> {
-			assocListMap.put(ba.getLeftTrackId(), ba);
-			assocListMap.put(ba.getRightTrackId(), ba);
+			assocListMap.put(ba.getLeftTrackletId(), ba);
+			assocListMap.put(ba.getRightTrackletId(), ba);
 		});
 		
 		List<KeyValue<TrackletId,Record>> storeUpdates
@@ -141,8 +142,8 @@ public class BinaryAssociationStore {
 	private ListMultimap<TrackletId,BinaryAssociation> groupByTracklet(List<BinaryAssociation> updates) {
 		final ArrayListMultimap<TrackletId,BinaryAssociation> assocListMap = ArrayListMultimap.create();
 		updates.forEach(ba -> {
-			assocListMap.put(ba.getLeftTrackId(), ba);
-			assocListMap.put(ba.getRightTrackId(), ba);
+			assocListMap.put(ba.getLeftTrackletId(), ba);
+			assocListMap.put(ba.getRightTrackletId(), ba);
 		});
 		
 		return assocListMap;

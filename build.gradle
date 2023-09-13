@@ -1,7 +1,7 @@
 apply plugin: 'java-library'
 apply plugin: 'maven-publish'
 apply plugin: 'com.github.johnrengelman.shadow'
-apply plugin: 'com.google.protobuf'
+//apply plugin: 'com.google.protobuf'
 //apply plugin: 'com.commercehub.gradle.plugin.avro'
 
 group = 'etri'
@@ -20,37 +20,9 @@ buildscript {
 	}
 	dependencies {
 		classpath 'com.github.jengelman.gradle.plugins:shadow:4.0.4'
-		classpath 'com.google.protobuf:protobuf-gradle-plugin:0.9.3'
+//		classpath 'com.google.protobuf:protobuf-gradle-plugin:0.9.3'
 //		classpath 'com.commercehub.gradle.plugin:gradle-avro-plugin:0.9.1'
 //		classpath 'com.netflix.nebula:gradle-aggregate-javadocs-plugin:2.2.+'
-	}
-}
-
-protobuf {
-    protoc {
-        artifact = "com.google.protobuf:protoc:3.23.2"
-    }
-    plugins {
-        grpc {
-            artifact = 'io.grpc:protoc-gen-grpc-java:1.54.1'
-        }
-    }
-    generateProtoTasks {
-        all()*.plugins {
-            grpc {}
-        }
-    }
-}
-
-sourceSets {
-	main {
-		java {
-			srcDirs 'src/main/proto'
-			srcDirs 'build/generated/source/proto/main/grpc'
-			srcDirs 'build/generated/source/proto/main/java'
-//			srcDirs 'build/generated/source/proto/test/grpc'
-//			srcDirs 'build/generated/source/proto/test/java'
-		}
 	}
 }
 
@@ -80,12 +52,6 @@ ext {
 //	postgresql_version = '42.3.3'
 	javalin_version = '4.6.3'
 	okhttp_version = '4.10.0'
-	
-//	combinatoricslib3_version = '3.3.3'
-	protobuf_java_version='3.24.1'
-	kafka_protobuf_serde_version= '2.2.0'
-	
-//	ai_djl_version = '0.23.0'
 }
 
 dependencies {
@@ -121,9 +87,6 @@ dependencies {
 	
 	// command line parser
 	api "info.picocli:picocli:${picocli_version}"
-
-	implementation "com.google.protobuf:protobuf-java:${protobuf_java_version}"
-	implementation "com.github.daniel-shuy:kafka-protobuf-serde:${kafka_protobuf_serde_version}"
 	
 	testImplementation group: 'junit', name: 'junit', version: '4.12'
 }

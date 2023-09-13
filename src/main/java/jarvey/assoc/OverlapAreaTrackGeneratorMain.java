@@ -2,18 +2,21 @@ package jarvey.assoc;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.Collection;
+import java.util.List;
 import java.util.Properties;
 
-import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.common.TopicPartition;
 
+import com.google.common.collect.Lists;
+
 import utils.UsageHelp;
 import utils.func.CheckedRunnable;
+import utils.jdbc.JdbcParameters;
+import utils.jdbc.JdbcProcessor;
+import utils.stream.FStream;
 
-import jarvey.streams.KafkaParameters;
 import jarvey.streams.processor.AbstractKafkaTopicProcessorDriver;
 import jarvey.streams.processor.KafkaTopicPartitionProcessor;
 
@@ -27,67 +30,68 @@ import picocli.CommandLine.Spec;
 
 
 /**
- * 
+ *
  * @author Kang-Woo Lee (ETRI)
  */
-@Command(name="single-global-track-generator",
+@Command(name="overlap-area-track-generator",
 			parameterListHeading = "Parameters:%n",
 			optionListHeading = "Options:%n",
-			description="Generate global tracks from node tracks in non-overlapping area")
-public class SingleGlobalTrackGeneratorMain extends AbstractKafkaTopicProcessorDriver<String,byte[]>
+			description="Generate global tracks in an overlap area.")
+public class OverlapAreaTrackGeneratorMain extends AbstractKafkaTopicProcessorDriver<String,byte[]>
 											implements CheckedRunnable {
 	@Spec private CommandSpec m_spec;
 	@Mixin private UsageHelp m_help;
-	@Mixin private KafkaParameters m_kafkaParams;
+	
+	@Mixin private JdbcParameters m_jdbcParams;
+
+	private List<String> m_inputTopics = Lists.newArrayList("node-tracks");
+	private String m_outputTopic = "global-tracks";
+	
+	private String m_overlapAreaFilePath = "overlap_areas.yaml";
+	
+	private OverlapAreaRegistry m_areaRegistry = null;
 
 	@Option(names={"--overlap-area"}, paramLabel="overlap-area-descriptor",
 			description="overlap area description file path.")
-	private String m_overlapAreaFilePath = "overlap_areas.yaml";
-
-	@Option(names={"--input"}, paramLabel="topic-name", description="input topic name")
-	private String m_inputTopic = "node-tracks";
-
-	@Option(names={"--output"}, paramLabel="topic-name",
-					description="output global-track topic. (default: global-tracks-single")
-	private String m_outputTopic = "global-tracks-single";
+	public void setOverlapAreaFile(String path) {
+		m_overlapAreaFilePath = path;
+	}
 	
-	private OverlapAreaRegistry m_areaRegistry = null;
-	private KafkaTopicPartitionProcessor<String, byte[]> m_trackGenerator;
-
-	@Override
-	public void close() throws Exception {
-		if ( m_trackGenerator != null ) {
-			m_trackGenerator.close();
-		}
-	}
-
-	@Override
-	protected KafkaConsumer<String, byte[]> openKafkaConsumer() {
-		return new KafkaConsumer<>(m_kafkaParams.toConsumerProperties());
-	}
-
 	@Override
 	protected Collection<String> getInputTopics() {
-		return Arrays.asList(m_inputTopic);
+		return m_inputTopics;
+	}
+	@Option(names={"--input"}, paramLabel="topic names", description="input topic names")
+	public void setInputTopics(String names) {
+		m_inputTopics = FStream.of(names.split(",")).map(String::trim).toList();
+	}
+	
+	@Option(names={"--output"}, paramLabel="topic-name", description="output topic name")
+	public void setOutputTopic(String name) {
+		m_outputTopic = name;
 	}
 
 	@Override
-	protected KafkaTopicPartitionProcessor<String, byte[]> allocateProcessor(TopicPartition tpart)
+	protected KafkaTopicPartitionProcessor<String,byte[]> allocateProcessor(TopicPartition tpart)
 		throws IOException {
 		if ( m_areaRegistry == null ) {
 			m_areaRegistry = OverlapAreaRegistry.load(new File(m_overlapAreaFilePath));
 		}
 		
+		JdbcProcessor jdbc = m_jdbcParams.createJdbcProcessor();
+		AssociationStore assocStore = new AssociationStore(jdbc);
+		
 		Properties producerProps = m_kafkaParams.toProducerProperties();
 		KafkaProducer<String, byte[]> producer = new KafkaProducer<>(producerProps);
-		SingleGlobalTrackGenerator gen = new SingleGlobalTrackGenerator(m_areaRegistry, producer,
-																		m_outputTopic);
+
+		OverlapAreaTrackGenerator gen
+			= new OverlapAreaTrackGenerator(m_areaRegistry, assocStore, producer, m_outputTopic);
 		return KafkaTopicPartitionProcessor.wrap(gen);
 	}
 	
 	@SuppressWarnings("deprecation")
 	public static final void main(String... args) throws Exception {
-		SingleGlobalTrackGeneratorMain cmd = new SingleGlobalTrackGeneratorMain();
+		OverlapAreaTrackGeneratorMain cmd = new OverlapAreaTrackGeneratorMain();
 		CommandLine commandLine = new CommandLine(cmd).setUsageHelpWidth(100);
 		try {
 			commandLine.parse(args);

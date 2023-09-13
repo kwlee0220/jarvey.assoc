@@ -19,6 +19,7 @@ import jarvey.streams.EventCollectingWindowAggregation;
 import jarvey.streams.HoppingWindowManager;
 import jarvey.streams.Windowed;
 import jarvey.streams.model.BinaryAssociation;
+import jarvey.streams.model.BinaryAssociationCollection;
 import jarvey.streams.model.Timestamped;
 import jarvey.streams.model.TrackletDeleted;
 import jarvey.streams.model.TrackletId;
@@ -28,21 +29,24 @@ import jarvey.streams.node.NodeTrack;
  * 
  * @author Kang-Woo Lee (ETRI)
  */
-class BinaryTrackletAssociator
+public class MotionBinaryTrackletAssociator
 		implements KeyValueMapper<String, NodeTrack,
 								Iterable<KeyValue<String, Either<BinaryAssociation, TrackletDeleted>>>> {
 	@SuppressWarnings("unused")
-	private static final Logger s_logger = LoggerFactory.getLogger(BinaryTrackletAssociator.class);
+	private static final Logger s_logger = LoggerFactory.getLogger(MotionBinaryTrackletAssociator.class);
 	
 	private final EventCollectingWindowAggregation<TaggedTrack> m_aggregation;
 	private double m_trackDistanceThreshold;
+	private final BinaryAssociationCollection m_binaryCollection;
 	
-	public BinaryTrackletAssociator(Duration splitInterval, double trackDistanceThreshold) {
-		HoppingWindowManager windowMgr = HoppingWindowManager.ofWindowSize(splitInterval)
-																.graceTime(Duration.ofSeconds(2));
+	public MotionBinaryTrackletAssociator(Duration splitInterval, double trackDistanceThreshold,
+											BinaryAssociationCollection binaryCollection) {
+		HoppingWindowManager windowMgr = HoppingWindowManager.ofWindowSize(splitInterval);
+//																.graceTime(Duration.ofSeconds(2));
 		m_aggregation = new EventCollectingWindowAggregation<>(windowMgr);
 		
 		m_trackDistanceThreshold = trackDistanceThreshold;
+		m_binaryCollection = binaryCollection;
 	}
 
 	@Override
@@ -101,7 +105,9 @@ class BinaryTrackletAssociator
 				if ( !left.getNodeId().equals(right.getNodeId()) ) {
 					BinaryAssociation assoc = TrackSlot.associate(left, right, m_trackDistanceThreshold);
 					if ( assoc != null ) {
-						outEvents.add(Either.left(assoc));
+						if ( m_binaryCollection.add(assoc) ) {
+							outEvents.add(Either.left(assoc));
+						}
 					}
 				}
 			}
@@ -159,6 +165,7 @@ class BinaryTrackletAssociator
 			return String.format("%s: %s", m_trackletId, m_tracks);
 		}
 		
+		
 		private static BinaryAssociation associate(TrackSlot left, TrackSlot right, double distThreshold) {
 			TrackletId leftKey = left.m_trackletId;
 			TrackletId rightKey = right.m_trackletId;
@@ -171,16 +178,9 @@ class BinaryTrackletAssociator
 				
 				long leftFirstTs = left.m_tracks.get(0).getFirstTimestamp();
 				long rightFirstTs = right.m_tracks.get(0).getFirstTimestamp();
-				if ( leftFirstTs <= rightFirstTs ) {
-					return new BinaryAssociation(leftKey.toString(),
-													leftKey, rightKey, score,
-													ret._2._1, ret._2._2, leftFirstTs);
-				}
-				else {
-					return new BinaryAssociation(rightKey.toString(),
-													leftKey, rightKey, score,
-													ret._2._1, ret._2._2, rightFirstTs);
-				}
+				
+				return new BinaryAssociation(leftKey, leftFirstTs, ret._2._1,
+												rightKey, rightFirstTs, ret._2._2, score);
 			}
 			else {
 				return null;

@@ -157,9 +157,8 @@ public class RepartitionNodeTrackMain extends AbstractKafkaTopicProcessorDriver<
 					areaId = lastAreaId;
 				}
 				else {
-					areaId = lastAreaId = m_areaRegistry.findByNodeId(nodeId)
-														.map(OverlapArea::getId)
-														.getOrNull();
+					OverlapArea area = m_areaRegistry.findByNodeId(nodeId);
+					areaId = lastAreaId = (area != null) ? area.getId() : null;
 					lastNodeId = nodeId;
 				}
 				

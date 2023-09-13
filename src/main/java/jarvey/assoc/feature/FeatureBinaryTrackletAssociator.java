@@ -23,13 +23,14 @@ import utils.jdbc.JdbcProcessor;
 import utils.stream.FStream;
 import utils.stream.KeyedGroups;
 
-import jarvey.assoc.feature.BinaryTrackletAssociator.MatchingSession.State;
+import jarvey.assoc.feature.FeatureBinaryTrackletAssociator.MatchingSession.State;
 import jarvey.assoc.feature.MCMOTNetwork.IncomingLink;
 import jarvey.assoc.feature.Utils.Match;
 import jarvey.streams.model.BinaryAssociation;
+import jarvey.streams.model.BinaryAssociationCollection;
+import jarvey.streams.model.TrackFeatureSerde;
 import jarvey.streams.model.TrackletDeleted;
 import jarvey.streams.model.TrackletId;
-import jarvey.streams.model.ZoneRelation;
 import jarvey.streams.node.NodeTrackletIndex;
 import jarvey.streams.node.NodeTrackletUpdateLogs;
 import jarvey.streams.node.TrackFeature;
@@ -41,29 +42,28 @@ import jarvey.streams.updatelog.KeyedUpdateLogs;
  * 
  * @author Kang-Woo Lee (ETRI)
  */
-class BinaryTrackletAssociator
+class FeatureBinaryTrackletAssociator
 		implements ValueMapper<TrackFeature, Iterable<Either<BinaryAssociation,TrackletDeleted>>> {
-	private static final Logger s_logger = LoggerFactory.getLogger(BinaryTrackletAssociator.class);
-	
-	private final FeatureBasedAssociationContext m_context;
+	private static final Logger s_logger = LoggerFactory.getLogger(FeatureBinaryTrackletAssociator.class);
+
 	private final MCMOTNetwork m_network = new MCMOTNetwork();
 	private final KeyedUpdateLogs<TrackFeature> m_indexStore;
 	private final NodeTrackletUpdateLogs m_trackletIndexes;
 	private final double m_topPercent;
 	
+	private BinaryAssociationCollection m_binaryCollection;
 	private Map<TrackletId, Candidate> m_candidates = Maps.newHashMap();
 	private Map<TrackletId, MatchingSession> m_sessions = Maps.newHashMap();
 
-	public BinaryTrackletAssociator(FeatureBasedAssociationContext context, JdbcProcessor jdbc, Properties consumerProps,
-									double topPercent) {
-		m_context = context;
-		
+	public FeatureBinaryTrackletAssociator(JdbcProcessor jdbc, Properties consumerProps,
+											double topPercent, BinaryAssociationCollection binaryCollection) {
 		Deserializer<TrackFeature> featureDeser = TrackFeatureSerde.s_deerializer;
 		m_indexStore = new KeyedUpdateLogs<>(jdbc, "track_features_index", consumerProps,
 											"track-features", featureDeser);
-		m_trackletIndexes = new NodeTrackletUpdateLogs(jdbc, "node_tracks_repartition_index",
-														consumerProps, "node-tracks-repartition");
+		m_trackletIndexes = new NodeTrackletUpdateLogs(jdbc, "node_tracks_index",
+														consumerProps, "node-tracks");
 		m_topPercent = topPercent;
+		m_binaryCollection = binaryCollection;
 	}
 	
 	@Override
@@ -96,13 +96,11 @@ class BinaryTrackletAssociator
 					assoc = new BinaryAssociation(id, candidate.getTrackletId(), tfeat.getTrackletId(),
 			 										ret._3, ret._2, ret._1, candidate.getStartTimestamp());
 				}
-				
-				if ( m_context.getBinaryAssociationCollection().add(assoc) ) {
+				if ( m_binaryCollection.add(assoc) ) {
 					assocList.add(assoc);
 				}
 			}
 		}
-		m_context.getBinaryAssociationStore().updateAll(assocList);
 		
 		return Funcs.map(assocList, Either::left);
 	}
@@ -118,37 +116,25 @@ class BinaryTrackletAssociator
 		// possible states: STATE_NOT_READY, STATE_ACTIVATED
 		session.addTrackFeature(tfeature);
 		
-		// EnterZone이 설정되지 않은 경우에는 node-track-index에서 해당 tracklet의
-		// enter-zone 정보를 알아낸다.
 		if ( session.m_enterZone == null ) {
-			ZoneRelation zrel = tfeature.getZoneRelation();
-			switch ( zrel.getRelation() ) {
-				case Entered: case Left:
-				case Through: case Inside:
-					session.m_startTs = tfeature.getTimestamp();
-					session.m_enterZone = zrel.getZoneId();
-					break;
-				default:
-					session.setState(State.NOT_READAY);
-					break;
+			NodeTrackletIndex trackletIndex = m_trackletIndexes.getIndex(trkId);
+			if ( trackletIndex != null ) {
+				session.m_startTs = trackletIndex.getTimestampRange().min();
+				session.m_enterZone = trackletIndex.getEnterZone();
+				if ( session.m_enterZone != null && s_logger.isDebugEnabled() ) {
+					s_logger.debug("The watching tracklet' enter-zone is ready: id={}, zone={}",
+									session.m_trkId, session.m_enterZone);
+				}
 			}
 		}
-		
-//		if ( session.m_enterZone == null ) {
-//			NodeTrackletIndex trackletIndex = m_trackletIndexes.getIndex(trkId);
-//			if ( trackletIndex != null ) {
-//				session.m_startTs = trackletIndex.getTimestampRange().min();
-//				session.m_enterZone = trackletIndex.getEnterZone();
-//			}
-//			else {
-//				if ( s_logger.isInfoEnabled() ) {
-//					s_logger.info("target tracklet is not ready: id={}", trkId);
-//				}
-//				
-//				session.m_state = STATE_NOT_READY;
-//				return session;
-//			}
-//		}
+		if ( session.m_enterZone == null ) {
+			if ( s_logger.isDebugEnabled() ) {
+				s_logger.debug("The watching tracklet' enter-zone is not ready: id={}", trkId);
+			}
+			
+			session.m_state = State.NOT_READAY;
+			return session;
+		}
 		
 		// 모든 incoming link 정보에 해당하는 node들에서 적절한 기간동안 지정된
 		// zone을 통해 exit한 tracklet에 대한 track-feature 들을 모두 수집한다.
@@ -223,19 +209,23 @@ class BinaryTrackletAssociator
 			List<String> missingKeys = Funcs.map(missingTrkIds, TrackletId::toString);
 			for ( KeyedUpdateIndex index: m_indexStore.readIndexes(missingKeys).values() ) {
 				if ( !index.isClosed() ) {
-					if ( s_logger.isInfoEnabled() ) {
-						s_logger.info("skip for the unfinished tracklet's features: id={}", index.getKey());
+					if ( s_logger.isDebugEnabled() ) {
+						s_logger.debug("skip for the unfinished tracklet's features: id={}", index.getKey());
 					}
 					continue;
 				}
 
 				TrackletId trkId = TrackletId.fromString(index.getKey());
 				Candidate candidate = new Candidate(trkId);
-				 m_indexStore.streamOfIndex(index)
-					 			.map(kv -> kv.value)
-					 			.filterNot(TrackFeature::isDeleted)
-					 			.forEach(candidate::addTrackFeature);
+				m_indexStore.streamOfIndex(index)
+				 			.map(kv -> kv.value)
+				 			.filterNot(TrackFeature::isDeleted)
+				 			.forEach(candidate::addTrackFeature);
 				 m_candidates.put(trkId, candidate);
+				if ( s_logger.isInfoEnabled() ) {
+					s_logger.info("candidate tracklet's features are ready: target={}, nfeatures={}",
+									index.getKey(), candidate.getFeatureCount());
+				}
 			}
 		}
 	}
@@ -290,6 +280,10 @@ class BinaryTrackletAssociator
 		
 		long getStartTimestamp() {
 			return m_trackFeatures.get(0).getTimestamp();
+		}
+		
+		int getFeatureCount() {
+			return m_featureList.size();
 		}
 		
 		void addTrackFeature(TrackFeature tfeat) {
