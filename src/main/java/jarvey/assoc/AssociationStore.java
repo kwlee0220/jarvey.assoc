@@ -9,6 +9,8 @@ import java.util.List;
 
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.kstream.KeyValueMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import utils.func.Tuple;
 import utils.jdbc.JdbcProcessor;
@@ -25,6 +27,8 @@ import jarvey.streams.serialization.json.GsonUtils;
  */
 public class AssociationStore implements KeyValueMapper<String, AssociationClosure,
 																KeyValue<String,AssociationClosure>> {
+	private static final Logger s_logger = LoggerFactory.getLogger(AssociationStore.class);
+	
 	private final JdbcProcessor m_jdbc;
 	
 	public AssociationStore(JdbcProcessor jdbc) {
@@ -52,6 +56,7 @@ public class AssociationStore implements KeyValueMapper<String, AssociationClosu
 			// 삽입할 association과 관련된 tracklet들이 기존에 관련된
 			// association들을 찾아 collection에 삽입한다.
 			List<Record> records = readAssociations(conn, closedAssoc.getTracklets());
+			
 			FStream.from(records)
 					.map(Record::getAssociation)
 					.distinct(Association::getId)
@@ -69,6 +74,10 @@ public class AssociationStore implements KeyValueMapper<String, AssociationClosu
 			
 			AssociationClosure merged = bestAssocs.get(0);
 			try {
+				if ( records.size() > 0 &&  s_logger.isInfoEnabled() ) {
+					s_logger.info("write a merged association: {}", merged);
+				}
+				
 				writeAssociation(conn, merged);
 				conn.commit();
 			}

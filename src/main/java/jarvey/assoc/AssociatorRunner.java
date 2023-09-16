@@ -1,6 +1,8 @@
 package jarvey.assoc;
 
 
+import java.io.File;
+import java.time.Duration;
 import java.util.Properties;
 import java.util.Set;
 
@@ -18,13 +20,10 @@ import org.slf4j.LoggerFactory;
 import com.google.common.collect.Sets;
 
 import utils.UsageHelp;
-import utils.jdbc.JdbcParameters;
-import utils.jdbc.JdbcProcessor;
 
-import jarvey.assoc.feature.FeatureAssociationParams;
 import jarvey.assoc.feature.FeatureAssociationStreamBuilder;
-import jarvey.assoc.motion.MotionAssociationParams;
 import jarvey.assoc.motion.MotionAssociationStreamBuilder;
+import jarvey.streams.DelayedTransformer;
 import jarvey.streams.KafkaAdmins;
 import jarvey.streams.KafkaParameters;
 import jarvey.streams.TrackTimestampExtractor;
@@ -38,6 +37,7 @@ import picocli.CommandLine.Command;
 import picocli.CommandLine.Help.Ansi;
 import picocli.CommandLine.Mixin;
 import picocli.CommandLine.Model.CommandSpec;
+import picocli.CommandLine.Option;
 import picocli.CommandLine.Spec;
 
 /**
@@ -51,83 +51,58 @@ import picocli.CommandLine.Spec;
 final class AssociatorRunner implements Runnable {
 	private static final Logger s_logger = LoggerFactory.getLogger(AssociatorRunner.class);
 
-	private static final String APPLICATION_ID = "associator";
 	private static final TrackTimestampExtractor TS_EXTRACTOR = new TrackTimestampExtractor();
 	
 	@Spec private CommandSpec m_spec;
 	@Mixin private UsageHelp m_help;
-	@Mixin private KafkaParameters m_kafkaParams;
-	@Mixin private JdbcParameters m_jdbcParams;
-	@Mixin private AssociationParams m_params;
+	
+	@Option(names={"--config"}, paramLabel="path", description="configuration file path")
+	private File m_configFile = new File("mcmot_configs.yaml");
+	
+	@Option(names={"--skip-motion"}, description="skip motion-based association")
+	private boolean m_skipMotion = false;
+	
+	@Option(names={"--skip-feature"}, description="skip feature-based association")
+	private boolean m_skipFeature = false;
+	
+	@Option(names={"--skip-global-tracks"}, description="skip global-tracks generation")
+	private boolean m_skipGlobalTracks = false;
+	
+	private MCMOTConfig m_configs;
+	private KafkaParameters m_kafkaParams;
 	
 	@Override
 	public void run() {
 		try {
-			if ( m_kafkaParams.getApplicationId() == null ) {
-				m_kafkaParams.setApplicationId(APPLICATION_ID);
-			}
+			m_configs = MCMOTConfig.load(m_configFile);
 			
-			OverlapAreaRegistry areaRegistry = m_params.getOverlapAreaRegistry();
-			Set<String> listeningNodes = m_params.getListeningNodes();
-			Properties consumerProps = m_kafkaParams.toConsumerProperties();
-			JdbcProcessor jdbc = m_jdbcParams.createJdbcProcessor();
+			m_kafkaParams = m_configs.getKafkaParameters();
 			AssociationCollection associations = new AssociationCollection("associations");
 			Set<TrackletId> closedTracklets = Sets.newHashSet();
 			AssociationCollection finalAssociations = new AssociationCollection("final-associations");
 			
 			StreamsBuilder builder = new StreamsBuilder();
-			
 			KStream<String,NodeTrack> nodeTracks =
 				builder
-					.stream(m_params.getNodeTracksTopic(),
+					.stream(m_configs.getNodeTracksTopic(),
 							Consumed.with(Serdes.String(), JarveySerdes.NodeTrack())
 									.withName("from-node-tracks")
 									.withTimestampExtractor(TS_EXTRACTOR)
 									.withOffsetResetPolicy(m_kafkaParams.getAutoOffsetReset()));
 			
-			MotionAssociationParams motionParams = new MotionAssociationParams();
-			motionParams.setOverlapRegistry(areaRegistry);
-			motionParams.setNodeTracksTopic(m_params.getNodeTracksTopic());
-			motionParams.setAssociationsTopic(m_params.getAssociationsTopic());
-			motionParams.setGlobalTracksTopic(m_params.getGlobalTracksTopic());
-
-			MotionAssociationStreamBuilder motionBuilder
-					= new MotionAssociationStreamBuilder(motionParams, jdbc, associations, closedTracklets,
-														finalAssociations);
-			motionBuilder.setGenerateGlobalTracks(false);
-			motionBuilder.build(nodeTracks);
+			if ( !m_skipMotion ) {
+				buildMotionAssociation(nodeTracks, associations, closedTracklets, finalAssociations);
+			}
 			
-			FeatureAssociationParams featureParams = new FeatureAssociationParams();
-			featureParams.setOverlapRegistry(areaRegistry);
-			featureParams.setListeningNodes(listeningNodes);
-			featureParams.setNodeTracksTopic(m_params.getNodeTracksTopic());
-			featureParams.setAssociationsTopic(m_params.getAssociationsTopic());
-			featureParams.setGlobalTracksTopic(m_params.getGlobalTracksTopic());
-			featureParams.setListeningNodes(m_params.getListeningNodes());
-
-			KStream<String,TrackFeature> trackFeatures =
-				builder
-					.stream(m_params.getTrackFeaturesTopic(),
-							Consumed.with(Serdes.String(), JarveySerdes.TrackFeature())
-									.withName("from-track-features")
-									.withOffsetResetPolicy(m_kafkaParams.getAutoOffsetReset()));
-
-			FeatureAssociationStreamBuilder featureBuilder
-					= new FeatureAssociationStreamBuilder(featureParams, jdbc, consumerProps,
-															associations, closedTracklets, finalAssociations);
-			featureBuilder.setGenerateGlobalTracks(false);
-			featureBuilder.build(nodeTracks, trackFeatures);
-
-			GlobalTrackGenerator gtrackGen = new GlobalTrackGenerator(areaRegistry, listeningNodes,
-																		associations, finalAssociations);
-			nodeTracks
-				.flatMap(gtrackGen, Named.as("generate-global-track"))
-				.to(m_params.getGlobalTracksTopic(),
-					Produced.with(Serdes.String(), JarveySerdes.GlobalTrack())
-							.withName("to-global-tracks-tentative"));
+			if ( !m_skipFeature ) {
+				buildFeatureAssociation(builder, nodeTracks, associations, closedTracklets, finalAssociations);
+			}
+			
+			if ( !m_skipGlobalTracks ) {
+				buildGlobalTracks(nodeTracks, associations, finalAssociations);
+			}
 			
 			Topology topology = builder.build();
-			
 			if ( s_logger.isInfoEnabled() ) {
 				s_logger.info("use Kafka servers: {}", m_kafkaParams.getBootstrapServers());
 				s_logger.info("use Kafka application: {}", m_kafkaParams.getApplicationId());
@@ -148,6 +123,50 @@ final class AssociatorRunner implements Runnable {
 		catch ( Exception e ) {
 			throw new RuntimeException(e);
 		}
+	}
+	
+	private void buildMotionAssociation(KStream<String,NodeTrack> nodeTracks,
+										AssociationCollection associations, Set<TrackletId> closedTracklets,
+										AssociationCollection finalAssociations) {
+		MotionAssociationStreamBuilder motionBuilder
+			= new MotionAssociationStreamBuilder(m_configs, associations, closedTracklets, finalAssociations);
+		motionBuilder.build(nodeTracks);
+	}
+	
+	private void buildFeatureAssociation(StreamsBuilder builder, KStream<String,NodeTrack> nodeTracks,
+											AssociationCollection associations, Set<TrackletId> closedTracklets,
+											AssociationCollection finalAssociations) {
+		KStream<String,TrackFeature> trackFeatures =
+			builder
+				.stream(m_configs.getTrackFeaturesTopic(),
+						Consumed.with(Serdes.String(), JarveySerdes.TrackFeature())
+								.withName("from-track-features")
+								.withOffsetResetPolicy(m_kafkaParams.getAutoOffsetReset()));
+		
+		FeatureAssociationStreamBuilder featureBuilder
+				= new FeatureAssociationStreamBuilder(m_configs, associations, closedTracklets, finalAssociations);
+		featureBuilder.build(nodeTracks, trackFeatures);
+	}
+	
+	@SuppressWarnings("deprecation")
+	private void buildGlobalTracks(KStream<String,NodeTrack> nodeTracks,
+									AssociationCollection associations,
+									AssociationCollection finalAssociations) {
+		OverlapAreaRegistry areaRegistry = m_configs.getOverlapAreaRegistry();
+		Set<String> listeningNodes = m_configs.getListeningNodes();
+		
+		Duration delay = m_configs.getOutputDelay();
+		if ( !(delay.isZero() || delay.isNegative()) ) {
+			nodeTracks = nodeTracks.flatTransform(() -> new DelayedTransformer<>(delay));
+		}
+		
+		GlobalTrackGenerator gtrackGen = new GlobalTrackGenerator(areaRegistry, listeningNodes,
+																	associations, finalAssociations);
+		nodeTracks
+			.flatMap(gtrackGen, Named.as("generate-global-track"))
+			.to(m_configs.getGlobalTracksTopic(),
+				Produced.with(Serdes.String(), JarveySerdes.GlobalTrack())
+						.withName("to-global-tracks-tentative"));
 	}
 	
 	@SuppressWarnings("deprecation")

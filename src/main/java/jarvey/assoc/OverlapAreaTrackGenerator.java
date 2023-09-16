@@ -3,6 +3,8 @@ package jarvey.assoc;
 import java.sql.SQLException;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
@@ -16,6 +18,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 
 import utils.func.FOption;
 import utils.func.Funcs;
@@ -24,10 +27,12 @@ import utils.stream.FStream;
 import utils.stream.KeyedGroups;
 
 import jarvey.streams.model.Association;
+import jarvey.streams.model.AssociationClosure;
 import jarvey.streams.model.GlobalTrack;
 import jarvey.streams.model.GlobalTrack.State;
 import jarvey.streams.model.JarveySerdes;
 import jarvey.streams.model.LocalTrack;
+import jarvey.streams.model.TrackletId;
 import jarvey.streams.node.NodeTrack;
 import jarvey.streams.processor.KafkaConsumerRecordProcessor;
 import jarvey.streams.serialization.json.GsonUtils;
@@ -52,6 +57,7 @@ public class OverlapAreaTrackGenerator implements KafkaConsumerRecordProcessor<S
 	private final AssociationCache m_cache = new AssociationCache(64);
 	private final List<LocalTrack> m_trackBuffer = Lists.newArrayList();
 	private long m_firstTs = -1;
+	private final Map<String,Set<TrackletId>> m_gtrackStates = Maps.newHashMap();
 	
 	public OverlapAreaTrackGenerator(OverlapAreaRegistry areaRegistry,
 										AssociationStore assocStore,
@@ -152,9 +158,10 @@ public class OverlapAreaTrackGenerator implements KafkaConsumerRecordProcessor<S
 	
 	private List<KeyValue<String,GlobalTrack>> toGlobalTrackBatch(List<LocalTrack> ltracks) {
 		// 'delete' track을 먼저 따로 뽑는다.
-		List<LocalTrack> deleteds = FStream.from(ltracks)
-											.filter(lt -> lt.isDeleted())
-											.toList();
+		KeyedGroups<Association, LocalTrack> deleteds
+			= FStream.from(ltracks)
+					.filter(lt -> lt.isDeleted())
+					.groupByKey(lt -> findAssociation(lt));
 
 		// 버퍼에 수집된 local track들을 association에 따라 분류한다.
 		// 만일 overlap area에 포함되지 않는 track의 경우에는 별도로 지정된
@@ -183,12 +190,38 @@ public class OverlapAreaTrackGenerator implements KafkaConsumerRecordProcessor<S
 		gtracks = FStream.from(gtracks)
 						.sort(GlobalTrack::getTimestamp)
 						.toList();
-		FStream.from(deleteds)
-				.map(lt -> GlobalTrack.from(lt, getOverlapAreaId(lt)))
+		
+		// delete event의 경우는 association 별로 소속 tracklet이 모두 delete되는
+		// 경우에만 delete global track을 추가하되, 이때도 association id를 사용한다.
+		deleteds.stream()
+				.flatMapIterable(kv -> handleTrackletDeleted((AssociationClosure)kv.key(), kv.value()))
 				.forEach(gtracks::add);
 		
 		List<KeyValue<String,GlobalTrack>> result = Funcs.map(gtracks, gt -> KeyValue.pair(gt.getKey(), gt));
 		return result;
+	}
+	
+	private List<GlobalTrack> handleTrackletDeleted(AssociationClosure assoc, List<LocalTrack> deleteds) {
+		if ( assoc == null ) {
+			return Funcs.map(deleteds, lt -> GlobalTrack.from(lt, getOverlapAreaId(lt)));
+		}
+		
+		Set<TrackletId> supports = m_gtrackStates.computeIfAbsent(assoc.getId(), k -> assoc.getTracklets());
+		deleteds = FStream.from(deleteds)
+							.sort(LocalTrack::getTimestamp)
+							.toList();
+		deleteds.forEach(lt -> supports.remove(lt.getTrackletId()));
+		if ( supports.isEmpty() ) {
+			m_gtrackStates.remove(assoc.getId());
+			LocalTrack last = Funcs.getLast(deleteds);
+			GlobalTrack gtrack
+				= new GlobalTrack(assoc.getId(), State.DELETED, getOverlapAreaId(last),
+									null, null, assoc.getFirstTimestamp(), last.getTimestamp());
+			return Collections.singletonList(gtrack);
+		}
+		else {
+			return Collections.emptyList();
+		}
 	}
 	
 	private boolean withAreaDistance(OverlapArea area, NodeTrack track) {
@@ -211,7 +244,7 @@ public class OverlapAreaTrackGenerator implements KafkaConsumerRecordProcessor<S
 							try {
 								Association assoc = m_assocStore.getAssociation(ltrack.getTrackletId());
 								m_cache.put(ltrack.getTrackletId(), assoc);
-								return null;
+								return assoc;
 							}
 							catch ( SQLException e ) {
 								return null;

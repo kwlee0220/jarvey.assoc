@@ -8,7 +8,6 @@ import java.util.Set;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
 
 import utils.Indexed;
 import utils.func.Funcs;
@@ -17,6 +16,7 @@ import utils.stream.FStream;
 
 import jarvey.streams.model.Association.BinaryRelation;
 import jarvey.streams.model.AssociationClosure;
+import jarvey.streams.model.BinaryAssociation;
 import jarvey.streams.model.TrackletId;
 
 
@@ -127,6 +127,10 @@ public class AssociationCollection implements Iterable<AssociationClosure>  {
 		return add(assoc, true);
 	}
 	
+	public List<AssociationClosure> add(BinaryAssociation assoc) {
+		return add(AssociationClosure.from(Collections.singletonList(assoc)));
+	}
+	
 	public List<AssociationClosure> add(AssociationClosure assoc, boolean expandOnConflict) {
 		// collection이 빈 경우는 바로 삽입하고 반환한다.
 		if ( size() == 0 ) {
@@ -146,28 +150,25 @@ public class AssociationCollection implements Iterable<AssociationClosure>  {
 					return Collections.emptyList();
 				}
 				else {
+					// 새로 삽입될 association이 동일 association이면서 점수가
+					// 더 높은 경우는 replace시킨다.
 					iter.remove();
 					m_associations.add(assoc);
-					
 					return Collections.singletonList(assoc);
 				}
 			}
+			else if ( rel == BinaryRelation.LEFT_SUBSUME ) {
+				// 이미 더 superior한 association이 존재하는 경우
+				return Collections.emptyList();
+			}
+			else if ( rel == BinaryRelation.RIGHT_SUBSUME ) {
+				// 기존 inferior한 association들을 모두 제거한다.
+				iter.remove();
+			}
 			else {
+				// 새로 삽입될 association과의 관계를 기준으로 grouping 시킨다.
 				groups.computeIfAbsent(rel, k -> Lists.newArrayList()).add(current);
 			}
-		}
-		
-		List<AssociationClosure> superiors = groups.get(BinaryRelation.LEFT_SUBSUME);
-		if ( superiors != null && superiors.size() > 0 ) {
-			// 이미 더 superior한 association이 존재하는 경우
-			return Collections.emptyList();
-		}
-		
-		List<AssociationClosure> inferiors = groups.get(BinaryRelation.RIGHT_SUBSUME);
-		if ( inferiors != null && inferiors.size() > 0 ) {
-			// 기존 inferior한 association들을 모두 제거한다.
-			Set<AssociationClosure> infSet = Sets.newHashSet(inferiors);
-			Funcs.removeIf(m_associations, cl -> infSet.contains(cl));
 		}
 		
 		boolean expanded = false;

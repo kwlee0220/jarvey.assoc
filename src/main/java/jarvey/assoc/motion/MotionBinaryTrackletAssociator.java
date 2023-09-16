@@ -15,11 +15,11 @@ import utils.func.Either;
 import utils.func.Tuple;
 import utils.stream.FStream;
 
+import jarvey.streams.BinaryAssociationCollection;
 import jarvey.streams.EventCollectingWindowAggregation;
 import jarvey.streams.HoppingWindowManager;
 import jarvey.streams.Windowed;
 import jarvey.streams.model.BinaryAssociation;
-import jarvey.streams.model.BinaryAssociationCollection;
 import jarvey.streams.model.Timestamped;
 import jarvey.streams.model.TrackletDeleted;
 import jarvey.streams.model.TrackletId;

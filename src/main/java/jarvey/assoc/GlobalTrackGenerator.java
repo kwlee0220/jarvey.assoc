@@ -76,12 +76,12 @@ public class GlobalTrackGenerator implements KeyValueMapper<String, NodeTrack,
 			return Collections.emptyList();
 		}
 
-		// 현재까지의 association들 중에서 superior들만 추린다.
-		List<AssociationClosure> bestAssocs = m_associations.getBestAssociations();
-		
+		// 현재까지의 association들 중에서 superior들만 추리고,
+		// 이미 close된 association들을 추가하여 best association 리스트를 생성한다.
 		AssociationCollection coll = new AssociationCollection("global-track-associations");
-		bestAssocs.forEach(coll::add);
+		m_associations.getBestAssociations().forEach(coll::add);
 		m_finalAssociations.forEach(coll::add);
+		List<AssociationClosure> bestAssocs = coll.getBestAssociations();
 		
 		// 'delete' track을 먼저 따로 뽑는다.
 		List<LocalTrack> deleteds = Funcs.filter(m_trackBuffer, LocalTrack::isDeleted);

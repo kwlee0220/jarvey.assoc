@@ -46,7 +46,7 @@ ext {
 	jts_version = '1.18.2'
 	picocli_version = '4.1.4'
 	
-	kafka_streams_version = '3.4.1'
+	kafka_streams_version = '3.5.1'
 	avro_version = '1.10.2'
 	
 //	postgresql_version = '42.3.3'

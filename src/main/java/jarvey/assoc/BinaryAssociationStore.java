@@ -21,9 +21,9 @@ import utils.func.Funcs;
 import utils.func.Tuple;
 import utils.stream.FStream;
 
+import jarvey.streams.BinaryAssociationCollection;
 import jarvey.streams.MockKeyValueStore;
 import jarvey.streams.model.BinaryAssociation;
-import jarvey.streams.model.BinaryAssociationCollection;
 import jarvey.streams.model.TrackletId;
 import jarvey.streams.serialization.json.GsonUtils;
 

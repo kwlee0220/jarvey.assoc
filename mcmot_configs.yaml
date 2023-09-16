@@ -1,0 +1,33 @@
+---
+kafka:
+   client-id: associator
+   bootstrap-servers: localhost:9092
+   auto-offset-reset: earliest   
+
+input-topics:
+   node-tracks: node-tracks
+   track-features: track-features
+
+jdbc: postgresql:localhost:5432:dna:urc2004:dna
+
+motion:
+   overlap-area: overlap_areas.yaml
+   match:
+      window-size: 1s
+      grace-time: 1s
+      max-distance: 5m
+
+feature:
+   camera-network: camera_network.yaml
+   listening-nodes:
+      - etri:04
+      - etri:05
+      - etri:07
+   match:
+      min-score: 0.3
+      top-percent: 0.2
+   
+output:
+   topic: global-tracks-tentative
+   delay: 5s
+

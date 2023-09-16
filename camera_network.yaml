@@ -1,0 +1,20 @@
+---
+#"etri:04":
+#   A:
+#      incoming_node: "etri:05"
+#      exit_zone: C
+#      transition_time: [1s, 3s]
+"etri:05":
+   A:
+      incoming_node: "etri:07"
+      exit_zone: A
+      transition_time: [1500ms, 3s]
+#   C:
+#      incoming_node: "etri:04"
+#      exit_zone: A
+#      transition_time: [500ms, 2500ms]
+"etri:07":
+   A:
+      incoming_node: "etri:05"
+      exit_zone: A
+      transition_time: [1500ms, 3s]

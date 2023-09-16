@@ -13,6 +13,7 @@
 		<Logger name="jarvey.assoc.motion.FinalMotionAssociationSelector" level="info"/>
 		<Logger name="jarvey.assoc.motion.FinalFeatureAssociationSelector" level="info"/>
 		<Logger name="jarvey.assoc.feature.FeatureBinaryTrackletAssociator" level="info"/>
+		<Logger name="jarvey.assoc.AssociationStore" level="info"/>
 		
 		<Root level="info">
 			<AppenderRef ref="STDOUT"/>

@@ -1,28 +1,84 @@
 package jarvey.assoc.feature;
 
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
 import java.time.Duration;
-import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+
+import org.apache.commons.compress.utils.Lists;
+import org.yaml.snakeyaml.Yaml;
 
 import com.google.common.collect.Maps;
+
+import utils.UnitUtils;
+import utils.func.Funcs;
+
+import jarvey.streams.model.Range;
 
 /**
 *
 * @author Kang-Woo Lee (ETRI)
 */
 public class MCMOTNetwork {
-	private Map<String,Map<String,List<IncomingLink>>> m_vertice = Maps.newHashMap();
+	private final Map<String,ListeningNode> m_listeningNodes = Maps.newHashMap();
+	
+	private MCMOTNetwork() {
+	}
+	
+	public Set<String> getListeningNodeAll() {
+		return m_listeningNodes.keySet();
+	}
+	
+	public ListeningNode getListeningNode(String nodeId) {
+		return m_listeningNodes.get(nodeId);
+	}
+	
+	private void addListeningNode(ListeningNode node) {
+		m_listeningNodes.put(node.m_nodeId, node);
+	}
+	
+	public static class ListeningNode {
+		private final String m_nodeId;
+		private final Map<String,List<IncomingLink>> m_incomingLinks = Maps.newHashMap();
+		
+		private ListeningNode(String nodeId) {
+			m_nodeId = nodeId;
+		}
+		
+		public String getNodeId() {
+			return m_nodeId;
+		}
+		
+		public List<IncomingLink> getIncomingLinks(String enterZone) {
+			return m_incomingLinks.getOrDefault(enterZone, Collections.emptyList());
+		}
+		
+		@Override
+		public String toString() {
+			return String.format("%s: %s", m_nodeId, m_incomingLinks);
+		}
+		
+		private void addIncomingLink(String enterZone, String exitNode, String exitZone,
+										Range<Duration> transTime) {
+			IncomingLink link = new IncomingLink(exitNode, exitZone, transTime);
+			List<IncomingLink> links = m_incomingLinks.computeIfAbsent(enterZone, k -> Lists.newArrayList());
+			links.add(link);
+		}
+	}
 	
 	public static class IncomingLink {
 		private final String m_exitNode;
 		private final String m_exitZone;
-		private final Duration m_transitionTime;
+		private final Range<Duration> m_transitionTimeRange;
 		
-		IncomingLink(String exitNode, String exitZone, Duration transTime) {
+		IncomingLink(String exitNode, String exitZone, Range<Duration> transTimeRange) {
 			m_exitNode = exitNode;
 			m_exitZone = exitZone;
-			m_transitionTime = transTime;
+			m_transitionTimeRange = transTimeRange;
 		}
 		
 		public String getExitNode() {
@@ -33,55 +89,39 @@ public class MCMOTNetwork {
 			return m_exitZone;
 		}
 		
-		public Duration getTransitionTime() {
-			return m_transitionTime;
+		public Range<Duration> getTransitionTimeRange() {
+			return m_transitionTimeRange;
 		}
 		
 		@Override
 		public String toString() {
-			return String.format("%s: ->%s [%s]", m_exitNode, m_exitZone, m_transitionTime);
+			return String.format("%s: ->%s %s", m_exitNode, m_exitZone, m_transitionTimeRange);
 		}
 	}
 	
-	public MCMOTNetwork() {
-		Map<String,List<IncomingLink>> zoneDesc = Maps.newHashMap();
-//		zoneDesc.put("A",
-//					Arrays.asList(
-//						new IncomingLink("etri:07", "A", Duration.ofSeconds(3))
-//					));
-//		m_vertice.put("etri:04", zoneDesc);
+	public static MCMOTNetwork load(File yamlFile) throws IOException {
+		MCMOTNetwork network = new MCMOTNetwork();
 		
-		zoneDesc = Maps.newHashMap();
-		zoneDesc.put("A",
-					Arrays.asList(
-						new IncomingLink("etri:07", "A", Duration.ofSeconds(1))
-					));
-		m_vertice.put("etri:05", zoneDesc);
-
-//		zoneDesc = Maps.newHashMap();
-//		zoneDesc.put("A",
-//					Arrays.asList(
-//						new IncomingLink("etri:07", "A", Duration.ofSeconds(2))
-//					));
-//		m_vertice.put("etri:06", zoneDesc);
-
-		zoneDesc = Maps.newHashMap();
-		zoneDesc.put("A",
-					Arrays.asList(
-//						new IncomingLink("etri:04", "A", Duration.ofSeconds(3))
-						new IncomingLink("etri:05", "A", Duration.ofMillis(1500))
-//						new IncomingLink("etri:06", "A", Duration.ofSeconds(2))
-					));
-		m_vertice.put("etri:07", zoneDesc);
-	}
-	
-	public List<IncomingLink> getIncomingLinks(String node, String enterZone) {
-		Map<String,List<IncomingLink>> vertex = m_vertice.get(node);
-		if ( vertex == null ) {
-			return null;
+		Map<String, Map<String,Object>> listeningNodeDescs = new Yaml().load(new FileReader(yamlFile));
+		for ( Map.Entry<String, Map<String,Object>> ent: listeningNodeDescs.entrySet() ) {
+			ListeningNode listener = new ListeningNode(ent.getKey());
+			for ( Map.Entry<String, Object> linkDesc: ent.getValue().entrySet() ) {
+				String enterZone = linkDesc.getKey();
+				
+				@SuppressWarnings("unchecked")
+				Map<String,Object> incomingLink = (Map<String,Object>)linkDesc.getValue();
+				String exitNode = (String)incomingLink.get("incoming_node");
+				String exitZone = (String)incomingLink.get("exit_zone");
+				
+				List<String> transTime = (List<String>)incomingLink.get("transition_time");
+				List<Duration> durList = Funcs.map(transTime,
+													s -> Duration.ofMillis(UnitUtils.parseDurationMillis(s)));
+				Range<Duration> transTimeRange = Range.between(durList.get(0), durList.get(1));
+				listener.addIncomingLink(enterZone, exitNode, exitZone, transTimeRange);
+			}
+			network.addListeningNode(listener);
 		}
-		else {
-			return vertex.get(enterZone);
-		}
+		
+		return network;
 	}
 }

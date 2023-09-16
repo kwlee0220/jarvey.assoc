@@ -25,9 +25,10 @@ import utils.stream.KeyedGroups;
 
 import jarvey.assoc.feature.FeatureBinaryTrackletAssociator.MatchingSession.State;
 import jarvey.assoc.feature.MCMOTNetwork.IncomingLink;
+import jarvey.assoc.feature.MCMOTNetwork.ListeningNode;
 import jarvey.assoc.feature.Utils.Match;
+import jarvey.streams.BinaryAssociationCollection;
 import jarvey.streams.model.BinaryAssociation;
-import jarvey.streams.model.BinaryAssociationCollection;
 import jarvey.streams.model.TrackFeatureSerde;
 import jarvey.streams.model.TrackletDeleted;
 import jarvey.streams.model.TrackletId;
@@ -46,7 +47,7 @@ class FeatureBinaryTrackletAssociator
 		implements ValueMapper<TrackFeature, Iterable<Either<BinaryAssociation,TrackletDeleted>>> {
 	private static final Logger s_logger = LoggerFactory.getLogger(FeatureBinaryTrackletAssociator.class);
 
-	private final MCMOTNetwork m_network = new MCMOTNetwork();
+	private final MCMOTNetwork m_network;
 	private final KeyedUpdateLogs<TrackFeature> m_indexStore;
 	private final NodeTrackletUpdateLogs m_trackletIndexes;
 	private final double m_topPercent;
@@ -55,8 +56,10 @@ class FeatureBinaryTrackletAssociator
 	private Map<TrackletId, Candidate> m_candidates = Maps.newHashMap();
 	private Map<TrackletId, MatchingSession> m_sessions = Maps.newHashMap();
 
-	public FeatureBinaryTrackletAssociator(JdbcProcessor jdbc, Properties consumerProps,
+	public FeatureBinaryTrackletAssociator(MCMOTNetwork network, JdbcProcessor jdbc, Properties consumerProps,
 											double topPercent, BinaryAssociationCollection binaryCollection) {
+		m_network = network;
+		
 		Deserializer<TrackFeature> featureDeser = TrackFeatureSerde.s_deerializer;
 		m_indexStore = new KeyedUpdateLogs<>(jdbc, "track_features_index", consumerProps,
 											"track-features", featureDeser);
@@ -97,6 +100,10 @@ class FeatureBinaryTrackletAssociator
 			 										ret._3, ret._2, ret._1, candidate.getStartTimestamp());
 				}
 				if ( m_binaryCollection.add(assoc) ) {
+//					// FIXME: 나중에 삭제
+//					if ( assoc.containsTracklet(TrackletId.fromString("etri:04[6]")) ) {
+//						System.out.print("");
+//					}
 					assocList.add(assoc);
 				}
 			}
@@ -140,10 +147,15 @@ class FeatureBinaryTrackletAssociator
 		// zone을 통해 exit한 tracklet에 대한 track-feature 들을 모두 수집한다.
 		if ( session.m_enterZone != null && session.getState() == State.NOT_READAY ) {
 			// 본 tracklet의 enter-zone 정보를 기반으로 동일 tracklet이 바로 전에
-			// 등장했을 만한 노드(카메라) 정보를 얻는다. 
-			List<IncomingLink> incomingLinks = m_network.getIncomingLinks(session.m_trkId.getNodeId(),
-																			session.m_enterZone);
-			if ( incomingLinks == null ) {
+			// 등장했을 만한 노드(카메라) 정보를 얻는다.
+			ListeningNode listeningNode = m_network.getListeningNode(session.m_trkId.getNodeId());
+			if ( listeningNode == null ) {
+				// Track 이벤트가 발생된 node에서 association을 수행하지 않는다면 중단시킨다. 
+				session.setState(State.DISABLED);
+			}
+			
+			List<IncomingLink> incomingLinks = listeningNode.getIncomingLinks(session.m_enterZone);
+			if ( incomingLinks.isEmpty() ) {
 				// 예측되는 이전 카메라 정보가 없는 경우는 추적을 포기한다.
 				session.setState(State.DISABLED);
 			}
@@ -152,7 +164,11 @@ class FeatureBinaryTrackletAssociator
 					s_logger.debug("found the previous cameras: {}:{}->, {}",
 									trkId, session.m_enterZone, incomingLinks);
 				}
-				
+
+//				// FIXME: 나중에 삭제
+//				if ( trkId.equals(TrackletId.fromString("etri:05[32]")) ) {
+//					System.out.print("");
+//				}
 				for ( IncomingLink link: incomingLinks ) {
 					// 이전 카메라서에서 추적됐을 것으로 예측되는 tracklet의 feature 정보들을
 					// download하고 matching 후보로 설정한다.
@@ -180,10 +196,11 @@ class FeatureBinaryTrackletAssociator
 	private List<TrackletId> prepareCandidateFeatures(long enterTs, IncomingLink link) {
 		// 이전 노드에서의 candidate tracklet의 예상 exit 시간 구간을 계산하여
 		// 해당 구간에 exit한 tracklet들을 후보들의 NodeTrackletIndex 정보는 읽어온다.
-		long ts = enterTs - link.getTransitionTime().toMillis();
+		long minTs = enterTs - link.getTransitionTimeRange().max().toMillis();
+		long maxTs = enterTs - link.getTransitionTimeRange().min().toMillis();
 		String whereClause
 			= String.format("node = '%s' and exit_zone='%s' and last_ts between %d and %d",
-							link.getExitNode(), link.getExitZone(), ts - 4*1000, ts+1000);
+							link.getExitNode(), link.getExitZone(), minTs, maxTs);
 		
 		List<TrackletId> candidateTrkIds
 			= Funcs.map(m_trackletIndexes.findIndexes(whereClause), NodeTrackletIndex::getTrackletId);
